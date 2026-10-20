@@ -1,7 +1,6 @@
-//! The pipe in one process, without elevation: a pipe made by the current user changes nothing
-//! in the system and goes away with the test.
+//! The socket in one process, without elevation: a socket made by the current user changes
+//! nothing in the system and goes away with the test.
 
-use std::os::windows::io::AsRawHandle as _;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -13,7 +12,7 @@ const BUSY: Duration = Duration::from_secs(10);
 fn unique() -> String {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     format!(
-        r"\\.\pipe\zapret-hub-cli-test-{}-{}",
+        "/tmp/zapret-hub-cli-test-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::SeqCst)
     )
@@ -41,9 +40,9 @@ fn a_second_server_cannot_take_the_name() {
     let name = unique();
     let _first = Server::bind(&name).unwrap();
     let Err(second) = Server::bind(&name) else {
-        panic!("FILE_FLAG_FIRST_PIPE_INSTANCE let a second server in");
+        panic!("the lock file let a second server in");
     };
-    assert_eq!(second.raw_os_error(), Some(5), "{second}");
+    assert_eq!(second.raw_os_error(), Some(13), "{second}");
 }
 
 #[test]
@@ -85,11 +84,7 @@ fn a_client_that_leaves_before_its_answer_does_not_stop_the_server() {
         std::thread::sleep(Duration::from_millis(300));
         String::from_utf8_lossy(line).into_owned()
     });
-    let mut gone = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&name)
-        .unwrap();
+    let mut gone = std::os::unix::net::UnixStream::connect(&name).unwrap();
     gone.write_all(b"bye\n").unwrap();
     drop(gone);
     std::thread::sleep(Duration::from_millis(500));
@@ -110,13 +105,9 @@ fn a_line_its_client_never_finished_reaches_no_handler() {
         let _ = ran.send(line.to_vec());
         String::new()
     });
-    // The server waits in ConnectNamedPipe by now, so it does read what the client wrote.
+    // The server waits in accept by now, so it does read what the client wrote.
     std::thread::sleep(Duration::from_millis(300));
-    let mut gone = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&name)
-        .unwrap();
+    let mut gone = std::os::unix::net::UnixStream::connect(&name).unwrap();
     gone.write_all(b"x").unwrap();
     drop(gone);
     assert_eq!(
@@ -158,136 +149,11 @@ fn the_descriptor_names_this_user() {
 }
 
 #[test]
-fn the_pipe_lets_in_system_administrators_and_this_user_only() {
-    use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
-    use windows::Win32::Security::Authorization::{
-        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-        SE_KERNEL_OBJECT,
-    };
-    use windows::Win32::Security::{
-        DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-    };
-    use windows::core::PWSTR;
+fn the_socket_only_this_user_may_reach() {
+    use std::os::unix::fs::PermissionsExt as _;
 
     let name = unique();
     serve(&name, |_| String::new());
-    let client = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&name)
-        .unwrap();
-    let what = DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
-    // SAFETY: plain Win32 calls on an open handle; both buffers are freed.
-    let sddl = unsafe {
-        let mut descriptor = PSECURITY_DESCRIPTOR::default();
-        GetSecurityInfo(
-            HANDLE(client.as_raw_handle()),
-            SE_KERNEL_OBJECT,
-            what,
-            None,
-            None,
-            None,
-            None,
-            Some(&mut descriptor),
-        )
-        .ok()
-        .unwrap();
-        let mut text = PWSTR::null();
-        ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            descriptor,
-            SDDL_REVISION_1,
-            what,
-            &mut text,
-            None,
-        )
-        .unwrap();
-        let sddl = text.to_string().unwrap();
-        LocalFree(Some(HLOCAL(text.0.cast())));
-        LocalFree(Some(HLOCAL(descriptor.0)));
-        sddl
-    };
-    let sid = pipe::current_user_sid().unwrap();
-    // SDDL writes the built-in Administrator (RID 500, the CI runner's user) as `LA`, not its SID.
-    let user = if sid.ends_with("-500") {
-        "LA".to_owned()
-    } else {
-        sid
-    };
-    assert!(sddl.contains(&format!(";;;{user})")), "{sddl}");
-    assert!(sddl.contains(";;;SY)") && sddl.contains(";;;BA)"), "{sddl}");
-    assert_eq!(sddl.matches("(A;").count(), 3, "nobody else: {sddl}");
-    assert!(sddl.contains("(ML;;NWNR;;;ME)"), "{sddl}");
-}
-
-#[test]
-fn the_app_can_identify_the_cli_but_not_act_as_it() {
-    use std::fs::File;
-    use std::io::{BufRead as _, BufReader, Write as _};
-    use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
-
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Security::{
-        GetTokenInformation, RevertToSelf, SECURITY_IMPERSONATION_LEVEL, SecurityIdentification,
-        TOKEN_QUERY, TokenImpersonationLevel,
-    };
-    use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
-    use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, ImpersonateNamedPipeClient, PIPE_WAIT,
-    };
-    use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
-    use windows::core::HSTRING;
-
-    let name = unique();
-    // SAFETY: a plain pipe with the default descriptor; the `File` owns and closes it.
-    let pipe = unsafe {
-        let raw = CreateNamedPipeW(
-            &HSTRING::from(&name),
-            PIPE_ACCESS_DUPLEX,
-            PIPE_WAIT,
-            1,
-            4096,
-            4096,
-            0,
-            None,
-        );
-        assert!(!raw.is_invalid(), "{}", std::io::Error::last_os_error());
-        File::from(OwnedHandle::from_raw_handle(raw.0))
-    };
-    let app = std::thread::spawn(move || {
-        let handle = HANDLE(pipe.as_raw_handle());
-        // ERROR_PIPE_CONNECTED when the client came first; a real failure fails the read below.
-        // SAFETY: a valid pipe handle, used synchronously.
-        let _ = unsafe { ConnectNamedPipe(handle, None) };
-        // Impersonating needs a read first.
-        BufReader::new(&pipe)
-            .read_until(b'\n', &mut Vec::new())
-            .unwrap();
-        // SAFETY: this thread impersonates only to open its token and reverts before anything
-        // else; the token is closed by its `OwnedHandle`.
-        let level = unsafe {
-            ImpersonateNamedPipeClient(handle).unwrap();
-            let mut token = HANDLE::default();
-            // As self: an identification token cannot open itself.
-            let opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token);
-            RevertToSelf().unwrap();
-            opened.unwrap();
-            let token = OwnedHandle::from_raw_handle(token.0);
-            let mut level = SECURITY_IMPERSONATION_LEVEL::default();
-            let mut size = 0;
-            GetTokenInformation(
-                HANDLE(token.as_raw_handle()),
-                TokenImpersonationLevel,
-                Some((&raw mut level).cast()),
-                size_of_val(&level) as u32,
-                &mut size,
-            )
-            .unwrap();
-            level
-        };
-        (&pipe).write_all(b"\n").unwrap();
-        pipe.sync_all().unwrap();
-        level
-    });
-    pipe::request(&name, b"who", BUSY).unwrap();
-    assert_eq!(app.join().unwrap(), SecurityIdentification);
+    let mode = std::fs::metadata(&name).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "rwx for the owner only, got {mode:o}");
 }

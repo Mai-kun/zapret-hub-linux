@@ -18,10 +18,12 @@ fn main() {
     println!("cargo:rerun-if-changed=../.git/refs/heads");
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("common-controls.manifest");
     println!("cargo:rerun-if-changed={}", manifest.display());
-    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
-    println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
-    // Only the app asks for elevation: tests and the bindings export run in a plain terminal.
-    println!("cargo:rustc-link-arg-bin=zapret-hub=/MANIFESTUAC:level='requireAdministrator'");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+        // Only the app asks for elevation: tests and the bindings export run in a plain terminal.
+        println!("cargo:rustc-link-arg-bin=zapret-hub=/MANIFESTUAC:level='requireAdministrator'");
+    }
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest()),

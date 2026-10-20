@@ -1,18 +1,13 @@
-//! The `zapret` Windows service: state through the Service Control Manager, changes through
-//! `sc`/`net` exactly as `service.bat` makes them, and the quick check after an install (5.4).
+//! The zapret systemd service: state through `systemctl`, changes as a unit file exactly like
+//! `service.bat` makes them, and the quick check after an install (5.4).
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use anyhow::Context as _;
 use probe::curl::{CheckKind, CheckStatus};
-use windows::Win32::System::Services::{
-    CloseServiceHandle, ENUM_SERVICE_STATUS_PROCESSW, EnumServicesStatusExW, OpenSCManagerW,
-    OpenServiceW, QueryServiceStatusEx, SC_ENUM_PROCESS_INFO, SC_HANDLE, SC_MANAGER_CONNECT,
-    SC_MANAGER_ENUMERATE_SERVICE, SC_STATUS_PROCESS_INFO, SERVICE_ACTIVE, SERVICE_AUTO_START,
-    SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATUS_PROCESS,
-    SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_WIN32,
-};
-use windows::core::{HSTRING, PCWSTR};
 
 use crate::batparse::ParsedArgs;
 use crate::folder::Folder;
@@ -34,65 +29,39 @@ pub enum SvcState {
     Other,
 }
 
-struct Handle(SC_HANDLE);
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        // SAFETY: the handle came from OpenSCManagerW/OpenServiceW and is closed once.
-        unsafe {
-            let _ = CloseServiceHandle(self.0);
-        }
-    }
+fn cmd(program: &str, args: &[&str]) -> anyhow::Result<exec::Output> {
+    Ok(exec::run(
+        Command::new(program).args(args),
+        Duration::from_secs(60),
+        None,
+    )?)
 }
 
-fn manager() -> Option<Handle> {
-    // SAFETY: plain call; the handle is wrapped for closing.
-    unsafe {
-        OpenSCManagerW(
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE,
-        )
-        .ok()
-        .map(Handle)
-    }
-}
-
-fn open(name: &str, access: u32) -> Option<Handle> {
-    let scm = manager()?;
-    // SAFETY: `scm` is open; the service handle is wrapped for closing.
-    unsafe {
-        OpenServiceW(scm.0, &HSTRING::from(name), access)
-            .ok()
-            .map(Handle)
-    }
-}
-
-/// State and process id; `None` when the service does not exist.
+/// ActiveState and MainPID of unit `name`; `None` when systemd does not know it.
 pub fn status(name: &str) -> Option<(SvcState, u32)> {
-    let service = open(name, SERVICE_QUERY_STATUS)?;
-    let mut buf = vec![0u8; size_of::<SERVICE_STATUS_PROCESS>()];
-    let mut needed = 0u32;
-    // SAFETY: the buffer has the size of the structure asked for.
-    unsafe {
-        QueryServiceStatusEx(
-            service.0,
-            SC_STATUS_PROCESS_INFO,
-            Some(&mut buf),
-            &mut needed,
-        )
+    let ask = cmd("systemctl", &["is-active", name]).ok()?;
+    if ask.code == Some(4) {
+        return None; // is-active exit 4: beyond systemd (not installed).
     }
+    let shown = cmd(
+        "systemctl",
+        &["show", name, "--property=ActiveState,MainPID", "--value"],
+    )
     .ok()?;
-    // SAFETY: the call above filled one SERVICE_STATUS_PROCESS.
-    let status = unsafe { std::ptr::read_unaligned(buf.as_ptr().cast::<SERVICE_STATUS_PROCESS>()) };
-    let state = match status.dwCurrentState {
-        SERVICE_STOPPED => SvcState::Stopped,
-        SERVICE_START_PENDING => SvcState::StartPending,
-        SERVICE_STOP_PENDING => SvcState::StopPending,
-        SERVICE_RUNNING => SvcState::Running,
+    let mut lines = shown.stdout.lines();
+    let state = map_state(lines.next().unwrap_or("unknown"));
+    let pid = lines.next().and_then(|line| line.parse().ok()).unwrap_or(0);
+    Some((state, pid))
+}
+
+fn map_state(active: &str) -> SvcState {
+    match active {
+        "active" => SvcState::Running,
+        "activating" => SvcState::StartPending,
+        "deactivating" => SvcState::StopPending,
+        "inactive" | "failed" | "maintenance" => SvcState::Stopped,
         _ => SvcState::Other,
-    };
-    Some((state, status.dwProcessId))
+    }
 }
 
 pub fn state(name: &str) -> SvcState {
@@ -110,8 +79,13 @@ pub fn active() -> (&'static str, &'static str) {
     }
 }
 
-fn key(name: &str) -> String {
-    format!(r"SYSTEM\CurrentControlSet\Services\{name}")
+/// The unit file of `name` as `systemctl cat` shows it, or `None` when it has no unit file.
+fn unit_text(name: &str) -> Option<String> {
+    cmd("systemctl", &["cat", name])
+        .ok()?
+        .check()
+        .ok()
+        .map(|out| out.stdout)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -120,85 +94,63 @@ pub struct SvcConfig {
     pub auto_start: bool,
 }
 
-/// `ImagePath` and `Start` from the service's registry key (5.1): what `sc qc` shows. Not from
-/// `QueryServiceConfigW`: its RPC reply is capped at 8 KB, and the `ImagePath` of `zapret`
-/// carries a strategy's whole argument list, which can pass 4000 characters. `None` when the key
-/// or its `ImagePath` is missing.
+/// `ExecStart` from the unit file (5.1), what `systemctl cat` shows. `None` when the unit or its
+/// ExecStart is missing.
 pub fn config(name: &str) -> Option<SvcConfig> {
-    let key = windows_registry::LOCAL_MACHINE.open(key(name)).ok()?;
+    let unit = unit_text(name)?;
+    let mut exec_start = None;
+    for line in unit.lines() {
+        if let Some(rest) = line.strip_prefix("ExecStart=") {
+            // Any `ExecStart=+/-service --args` modifier goes outside the command line.
+            exec_start = Some(rest.trim_start_matches(['-', '+', '/']).trim().to_owned());
+        }
+    }
     Some(SvcConfig {
-        image_path: key.get_string("ImagePath").ok()?,
-        auto_start: key
-            .get_u32("Start")
-            .is_ok_and(|start| start == SERVICE_AUTO_START.0),
+        image_path: exec_start?,
+        auto_start: cmd("systemctl", &["is-enabled", name])
+            .ok()?
+            .success(),
     })
 }
 
-/// Name and display name of every running Win32 service: what a bare `sc query` lists.
+/// Name and description of every running service: what a bare `systemctl list-units` lists.
 pub fn active_services() -> Vec<(String, String)> {
-    let Some(scm) = manager() else {
+    let Ok(out) = cmd(
+        "systemctl",
+        &["list-units", "--type=service", "--state=running", "--no-legend"],
+    ) else {
         return Vec::new();
     };
-    let (mut needed, mut count) = (0u32, 0u32);
-    // SAFETY: a size query with no buffer.
-    let _ = unsafe {
-        EnumServicesStatusExW(
-            scm.0,
-            SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32,
-            SERVICE_ACTIVE,
-            None,
-            &mut needed,
-            &mut count,
-            None,
-            PCWSTR::null(),
-        )
-    };
-    let mut buf = vec![0u8; needed as usize + 4096];
-    // SAFETY: `buf` is larger than the size asked for.
-    let listed = unsafe {
-        EnumServicesStatusExW(
-            scm.0,
-            SC_ENUM_PROCESS_INFO,
-            SERVICE_WIN32,
-            SERVICE_ACTIVE,
-            Some(&mut buf),
-            &mut needed,
-            &mut count,
-            None,
-            PCWSTR::null(),
-        )
-    };
-    if listed.is_err() {
-        return Vec::new();
-    }
-    let item = size_of::<ENUM_SERVICE_STATUS_PROCESSW>();
-    (0..count as usize)
-        .map(|i| {
-            // SAFETY: the call wrote `count` entries at the start of `buf`; their strings point into it.
-            unsafe {
-                let entry = std::ptr::read_unaligned(
-                    buf.as_ptr()
-                        .add(i * item)
-                        .cast::<ENUM_SERVICE_STATUS_PROCESSW>(),
-                );
-                (
-                    entry.lpServiceName.to_string().unwrap_or_default(),
-                    entry.lpDisplayName.to_string().unwrap_or_default(),
-                )
-            }
+    out.stdout
+        .lines()
+        .map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next().unwrap_or_default().to_owned();
+            let description: String = fields
+                .skip(3)
+                .collect::<Vec<&str>>()
+                .join(" ");
+            (name, description)
         })
         .collect()
+}
+
+/// `~/.local/share/zapret-hub/services.json`: service -> strategy name recorded next to it.
+fn strategy_marker_path() -> PathBuf {
+    std::env::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".local/share/zapret-hub/services.json")
+}
+
+fn markers() -> Option<HashMap<String, String>> {
+    let text = std::fs::read_to_string(strategy_marker_path()).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// The strategy name recorded next to service `name`: `service.bat` writes it for `zapret`, the app
 /// writes `zapret2:<name>` for `zapret2` (zapret2 spec 6).
 pub fn strategy_of(name: &str) -> Option<String> {
-    windows_registry::LOCAL_MACHINE
-        .open(key(name))
-        .ok()?
-        .get_string(STRATEGY_VALUE)
-        .ok()
+    markers()?.get(name).cloned()
 }
 
 /// The active engine's strategy: a Flowseal name or `zapret2:<name>`.
@@ -207,20 +159,17 @@ pub fn strategy() -> Option<String> {
 }
 
 pub fn set_strategy_of(service: &str, name: &str) -> anyhow::Result<()> {
-    let key = key(service);
-    windows_registry::LOCAL_MACHINE
-        .create(&key)?
-        .set_string(STRATEGY_VALUE, name)?;
-    log::info!(target: "exec", r"registry: HKLM\{key} {STRATEGY_VALUE} = {name}");
+    let path = strategy_marker_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    let mut map = markers().unwrap_or_default();
+    map.insert(service.to_owned(), name.to_owned());
+    std::fs::write(&path, serde_json::to_string(&map)?)
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    log::info!(target: "exec", "{}: {STRATEGY_VALUE} = {name}", path.display());
     Ok(())
-}
-
-fn cmd(program: &str, args: &[&str]) -> anyhow::Result<exec::Output> {
-    Ok(exec::run(
-        Command::new(program).args(args),
-        Duration::from_secs(60),
-        None,
-    )?)
 }
 
 fn wait_until(max: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -234,30 +183,34 @@ fn wait_until(max: Duration, mut done: impl FnMut() -> bool) -> bool {
     done()
 }
 
-/// `sc create <name> binPath= ... DisplayName= <name> start= auto|demand` and the description, as
+/// The unit file path as `create` writes it and `request_delete` removes it.
+fn unit_path(name: &str) -> PathBuf {
+    PathBuf::from(format!("/etc/systemd/system/{name}.service"))
+}
+
+/// `<name>.service` with `ExecStart = bin_path`, wanted by multi-user when `auto_start`, as
 /// `service.bat` makes `zapret`; `zapret2` the same way (zapret2 spec 6).
 pub fn create(name: &str, bin_path: &str, auto_start: bool) -> anyhow::Result<()> {
-    let start = if auto_start { "auto" } else { "demand" };
-    cmd(
-        "sc",
-        &[
-            "create",
-            name,
-            "binPath=",
-            bin_path,
-            "DisplayName=",
-            name,
-            "start=",
-            start,
-        ],
-    )?
-    .check()?;
     let description = if name == SERVICE {
         "Zapret DPI bypass software"
     } else {
         "zapret2 DPI bypass software"
     };
-    let _ = cmd("sc", &["description", name, description]);
+    let wanted = if auto_start {
+        "WantedBy=multi-user.target"
+    } else {
+        "# not started at boot"
+    };
+    let unit = format!(
+        "[Unit]\nDescription={description}\nAfter=network.target\n\n[Service]\nExecStart={bin_path}\n\n[Install]\n{wanted}\n",
+    );
+    let path = unit_path(name);
+    std::fs::write(&path, unit)
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    cmd("systemctl", &["daemon-reload"])?.check()?;
+    if auto_start {
+        let _ = cmd("systemctl", &["enable", name]);
+    }
     Ok(())
 }
 
@@ -270,34 +223,38 @@ pub fn install(folder: &Folder, name: &str, parsed: &ParsedArgs) -> anyhow::Resu
     stop_and_delete(SERVICE2)?;
     crate::procs::kill_all(WINWS2)?;
     create(SERVICE, &parsed.bin_path(&folder.winws()), true)?;
-    cmd("sc", &["start", SERVICE])?.check()?;
+    cmd("systemctl", &["start", SERVICE])?.check()?;
     set_strategy_of(SERVICE, name)
 }
 
-/// `net stop` + `sc delete` with errors ignored, as `service.bat` does where it does not care.
+/// `systemctl stop` + the unit file gone with errors ignored, as `service.bat` does where it
+/// does not care.
 pub fn request_delete(name: &str) {
-    let _ = cmd("net", &["stop", name]);
-    let _ = cmd("sc", &["delete", name]);
+    let _ = cmd("systemctl", &["stop", name]);
+    let _ = cmd("systemctl", &["disable", name]);
+    let path = unit_path(name);
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+        let _ = cmd("systemctl", &["daemon-reload"]);
+    }
 }
 
-/// `request_delete`, then waits until the SCM forgets the service.
+/// `request_delete`, then waits until `systemctl` forgets the service.
 pub fn stop_and_delete(name: &str) -> anyhow::Result<()> {
     if state(name) == SvcState::NotInstalled {
         return Ok(());
     }
     request_delete(name);
     anyhow::ensure!(
-        wait_until(Duration::from_secs(10), || state(name)
-            == SvcState::NotInstalled),
-        "service {name} is still there after sc delete (marked for deletion?): close services.msc and try again"
+        wait_until(Duration::from_secs(10), || state(name) == SvcState::NotInstalled),
+        "service {name} is still there after its unit file was removed: close the systemd manager and try again"
     );
     Ok(())
 }
 
-/// `:service_remove`: zapret and zapret2, every winws and winws2, WinDivert, WinDivert14. Only the
-/// services have to go. As in `service.bat` the rest is best effort: a process may end by itself,
-/// and a WinDivert driver that another program holds stays; their errors go to the journal as
-/// warnings.
+/// `:service_remove`: zapret and zapret2, every winws and winws2. Only the services have to go.
+/// The rest is best effort: a process may end by itself, and a program another holds stays; their
+/// errors go to the journal as warnings. (A WinDivert driver has no unit here.)
 pub fn remove() -> anyhow::Result<()> {
     stop_and_delete(SERVICE)?;
     stop_and_delete(SERVICE2)?;
@@ -306,17 +263,12 @@ pub fn remove() -> anyhow::Result<()> {
             log::warn!(target: "exec", "{image} was not ended: {err:#}");
         }
     }
-    for driver in ["WinDivert", "WinDivert14"] {
-        if let Err(err) = stop_and_delete(driver) {
-            log::warn!(target: "exec", "{driver} was left in place: {err:#}");
-        }
-    }
     Ok(())
 }
 
 pub fn start(name: &str) -> anyhow::Result<()> {
     if state(name) != SvcState::Running {
-        cmd("net", &["start", name])?.check()?;
+        cmd("systemctl", &["start", name])?.check()?;
     }
     Ok(())
 }
@@ -326,7 +278,7 @@ pub fn stop(name: &str) -> anyhow::Result<()> {
         state(name),
         SvcState::Running | SvcState::StartPending | SvcState::Other
     ) {
-        cmd("net", &["stop", name])?.check()?;
+        cmd("systemctl", &["stop", name])?.check()?;
     }
     Ok(())
 }
@@ -358,7 +310,7 @@ pub fn reinstall_active(folder: &Folder) -> anyhow::Result<()> {
     }
     let Some(name) = strategy_of(SERVICE) else {
         anyhow::bail!(
-            "the zapret service has no strategy name in the registry, so it cannot be installed again with the new game filter: apply a strategy first"
+            "the zapret service has no strategy name recorded, so it cannot be installed again with the new game filter: apply a strategy first"
         );
     };
     let file = crate::strategies::find(folder, &name)?;
@@ -369,32 +321,22 @@ pub fn reinstall_active(folder: &Folder) -> anyhow::Result<()> {
     )
 }
 
-/// `netsh interface tcp show global`, the `RFC 1323 Timestamps` line. Labels are translated, the
-/// RFC number and the value are not. `None` when the line is missing.
+/// `/proc/sys/net/ipv4/tcp_timestamps`, the flag that Flowseal's install turns on. `None` when
+/// the file is unreadable.
 pub fn tcp_timestamps() -> Option<bool> {
-    parse_timestamps(
-        &cmd("netsh", &["interface", "tcp", "show", "global"])
-            .ok()?
-            .stdout,
-    )
+    parse_timestamps(&std::fs::read_to_string("/proc/sys/net/ipv4/tcp_timestamps").ok()?)
 }
 
 pub fn parse_timestamps(text: &str) -> Option<bool> {
-    let line = text.lines().find(|line| line.contains("1323"))?;
-    Some(
-        line.rsplit(':')
-            .next()?
-            .trim()
-            .eq_ignore_ascii_case("enabled"),
-    )
+    match text.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
 }
 
 pub fn enable_tcp_timestamps() -> anyhow::Result<()> {
-    cmd(
-        "netsh",
-        &["interface", "tcp", "set", "global", "timestamps=enabled"],
-    )?
-    .check()?;
+    cmd("sysctl", &["-w", "net.ipv4.tcp_timestamps=1"])?.check()?;
     Ok(())
 }
 

@@ -11,15 +11,30 @@ pub struct LocalTime {
 
 impl LocalTime {
     pub fn now() -> Self {
-        // SAFETY: GetLocalTime has no preconditions.
-        let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+        // SAFETY: `time` only writes its own struct, `localtime_r` fills a struct we own.
+        let mut t = libc::tm {
+            tm_year: 0,
+            tm_mon: 0,
+            tm_mday: 0,
+            tm_hour: 0,
+            tm_min: 0,
+            tm_sec: 0,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: 0,
+            tm_gmtoff: 0,
+            tm_zone: std::ptr::null_mut(),
+        };
+        let now = unsafe { libc::time(std::ptr::null_mut()) };
+        // SAFETY: `libc::time` has no preconditions; `t` is a valid struct of the right type.
+        unsafe { libc::localtime_r(&now, &mut t) };
         Self {
-            year: t.wYear,
-            month: t.wMonth,
-            day: t.wDay,
-            hour: t.wHour,
-            minute: t.wMinute,
-            second: t.wSecond,
+            year: (t.tm_year + 1900) as u16,
+            month: (t.tm_mon + 1) as u16,
+            day: t.tm_mday as u16,
+            hour: t.tm_hour as u16,
+            minute: t.tm_min as u16,
+            second: t.tm_sec as u16,
         }
     }
 

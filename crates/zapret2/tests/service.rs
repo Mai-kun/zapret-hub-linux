@@ -18,9 +18,10 @@ fn winws2_gets_the_strategy_first_and_its_own_flags_last() {
     let dir = tempfile::tempdir().unwrap();
     common::fake_engine(dir.path(), "bin", common::LIB);
     let engine = Engine::open(dir.path()).unwrap();
+    let exe = dir.path().join("bin").join("winws2.exe");
     assert_eq!(
         bin_path(&engine, tail),
-        format!("\"{}\\bin\\winws2.exe\" {tail}", dir.path().display())
+        format!("\"{}\" {tail}", exe.display())
     );
 }
 
@@ -54,7 +55,7 @@ fn a_save_writes_nothing_until_the_check_passes() {
         "{:#}",
         save(&engine, None, data.path(), "mine", text, true).unwrap_err()
     );
-    assert!(err.contains("os error 193"), "{err}");
+    assert!(err.contains("Exec format error"), "{err}");
     assert!(!file.exists());
     let err = format!(
         "{:#}",

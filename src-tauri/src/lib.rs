@@ -118,44 +118,19 @@ pub fn report(err: &anyhow::Error) {
     fatal(&format!("{}\n\n{err:#}", texts::FAILED_TO_START));
 }
 
-/// The one native message box: there is no window to show the error in.
+/// There is no window to show the error in: log, console and a desktop notification.
 fn fatal(text: &str) {
-    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
-    use windows::core::HSTRING;
     log::error!("{text}");
-    // SAFETY: a plain Win32 call with valid, NUL-terminated wide strings.
-    let _ = unsafe {
-        MessageBoxW(
-            None,
-            &HSTRING::from(text),
-            &HSTRING::from(texts::APP),
-            MB_OK | MB_ICONERROR,
-        )
-    };
-}
-
-const WEBVIEW2_CLIENT: &str =
-    r"Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
-
-/// `pv` of the WebView2 Runtime, per machine (WOW6432Node on 64-bit Windows) or per user. An
-/// uninstall leaves an empty value or `0.0.0.0` behind.
-fn webview2_installed() -> bool {
-    [
-        windows_registry::LOCAL_MACHINE.open(format!(r"SOFTWARE\WOW6432Node\{WEBVIEW2_CLIENT}")),
-        windows_registry::CURRENT_USER.open(format!(r"Software\{WEBVIEW2_CLIENT}")),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(|key| key.get_string("pv").ok())
-    .any(|version| !version.trim().is_empty() && version.trim() != "0.0.0.0")
+    eprintln!("{text}");
+    let _ = std::process::Command::new("notify-send")
+        .arg("-a")
+        .arg(texts::APP)
+        .arg(texts::FAILED_TO_START)
+        .arg(text)
+        .spawn();
 }
 
 pub fn run() -> anyhow::Result<()> {
-    // Without the runtime no window can exist: the user is told here (spec 12).
-    if !webview2_installed() {
-        fatal(texts::WEBVIEW2_MISSING);
-        std::process::exit(1);
-    }
     let paths = Paths::current()?;
     journal::init(paths.logs());
     log::info!(

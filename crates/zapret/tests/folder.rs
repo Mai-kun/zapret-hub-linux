@@ -27,12 +27,17 @@ fn names_everything_that_is_missing() {
 #[test]
 fn root_from_the_service_image_path() {
     assert_eq!(
-        root_from_image_path(r#""E:\Zapret\bin\winws.exe"   --wf-tcp 80"#),
-        Some(PathBuf::from(r"E:\Zapret"))
+        root_from_image_path(r#""/opt/zapret/bin/winws.exe"   --wf-tcp 80"#),
+        Some(PathBuf::from("/opt/zapret"))
     );
     assert_eq!(
-        root_from_image_path(r"C:\z\bin\winws.exe --x"),
-        Some(PathBuf::from(r"C:\z"))
+        root_from_image_path("/usr/local/bin/zapret/bin/winws.exe --x"),
+        Some(PathBuf::from("/usr/local/bin/zapret"))
+    );
+    // A Windows ImagePath of an old install is read the same way: backslashes in, one component.
+        assert_eq!(
+        root_from_image_path(r#""E:\Zapret\bin\winws.exe"   --wf-tcp 80"#),
+        None
     );
 }
 

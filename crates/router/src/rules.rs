@@ -169,13 +169,21 @@ pub fn covers(domain: &str, name: &str) -> bool {
             .is_some_and(|head| head.ends_with('.'))
 }
 
+/// A file name or an absolute path, either ending in .exe. Like `is_absolute`, but the Windows
+/// forms (`C:\`, `\\server`) count too: a rules file is written the same way on any OS.
+fn absolute_path(a: &str) -> bool {
+    Path::new(a).is_absolute()
+        || a.starts_with(r"\\")
+        || (a.len() > 2 && a.as_bytes()[1] == b':')
+}
+
 /// A file name or an absolute path, either ending in .exe.
 fn valid_app(a: &str) -> bool {
     let stem = a.len().checked_sub(4).filter(|&i| a.is_char_boundary(i));
     let named = stem.is_some_and(|i| i > 0 && a[i..].eq_ignore_ascii_case(".exe"));
     named
         && !a.contains(['*', '?', '"', '<', '>', '|'])
-        && (Path::new(a).is_absolute() || !a.contains(['\\', '/', ':']))
+        && (absolute_path(a) || !a.contains(['\\', '/', ':']))
 }
 
 /// Lowercase with backslash separators: how programs are compared.

@@ -16,6 +16,13 @@ pub fn fake_engine(root: &Path, exe_dir: &str, lib: &str) {
     ] {
         fs::write(exe_dir.join(file), b"").unwrap();
     }
+    // An empty file is no program on Linux either — once it has the executable bit: ENOEXEC.
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(
+        exe_dir.join("winws2.exe"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     fs::create_dir_all(root.join("lua")).unwrap();
     fs::write(root.join("lua").join("zapret-lib.lua"), lib).unwrap();
     fs::write(root.join("lua").join("zapret-antidpi.lua"), "").unwrap();
@@ -32,7 +39,7 @@ pub fn fake_flowseal(root: &Path, files: &[&str]) -> zapret::folder::Folder {
         fs::create_dir_all(root.join(dir)).unwrap();
     }
     fs::write(root.join("service.bat"), "set \"LOCAL_VERSION=1.10.3\"\r\n").unwrap();
-    for file in [r"bin\winws.exe", r"bin\WinDivert64.sys"]
+    for file in ["bin/winws.exe", "bin/WinDivert64.sys"]
         .iter()
         .chain(files)
     {

@@ -2,7 +2,6 @@
 //! and the winws the tests run themselves.
 
 use std::io::Read;
-use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -19,7 +18,23 @@ pub struct Proc {
     pub args: Vec<String>,
 }
 
-/// Processes whose image name is `image` (case-insensitive), with exe path and arguments.
+/// The image name without its Windows `.exe`: how a program's own names keep matching.
+fn same_image(name: &str, image: &str) -> bool {
+    fn stem(s: &str) -> &str {
+        let cut = s
+            .len()
+            .checked_sub(4)
+            .filter(|i| s[*i..].eq_ignore_ascii_case(".exe"));
+        match cut {
+            Some(i) => &s[..i],
+            None => s,
+        }
+    }
+    stem(name).eq_ignore_ascii_case(stem(image))
+}
+
+/// Processes whose image name is `image` (case-insensitive, `.exe` ignored), with exe path and
+/// arguments.
 pub fn find(image: &str) -> Vec<Proc> {
     let mut system = System::new();
     system.refresh_processes_specifics(
@@ -32,7 +47,7 @@ pub fn find(image: &str) -> Vec<Proc> {
     system
         .processes()
         .values()
-        .filter(|p| p.name().to_string_lossy().eq_ignore_ascii_case(image))
+        .filter(|p| same_image(&p.name().to_string_lossy(), image))
         .map(|p| Proc {
             pid: p.pid().as_u32(),
             exe: p.exe().map(Path::to_path_buf),
@@ -50,33 +65,36 @@ pub fn is_running(image: &str) -> bool {
     !find(image).is_empty()
 }
 
-/// `taskkill /IM <image> /F`, when one runs. A process that ends between the check and taskkill
-/// makes taskkill fail: with none left that is done; otherwise the error carries taskkill's output.
-/// taskkill returns once termination is asked for, not done: this waits until the processes are
-/// gone, so their handles (WinDivert's among them) are closed before what comes next starts.
+/// Ends every process named `image` (SIGKILL), waiting until the name is gone, so their file
+/// handles (WinDivert's among them) are closed before what comes next starts.
 pub fn kill_all(image: &str) -> anyhow::Result<()> {
     if !is_running(image) {
         return Ok(());
     }
-    let output = exec::run(
-        Command::new("taskkill").args(["/IM", image, "/F"]),
-        Duration::from_secs(15),
-        None,
-    )?;
-    if !output.success() && !is_running(image) {
-        log::info!(target: "exec", "{image} ended by itself before taskkill reached it");
-        return Ok(());
-    }
-    output.check()?;
     let started = Instant::now();
-    while is_running(image) {
+    loop {
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        for proc in system.processes().values() {
+            if same_image(&proc.name().to_string_lossy(), image)
+                && proc.pid().as_u32() != std::process::id()
+            {
+                proc.kill();
+            }
+        }
+        if !is_running(image) {
+            return Ok(());
+        }
         anyhow::ensure!(
             started.elapsed() < Duration::from_secs(10),
-            "{image} is still running 10 s after taskkill /F"
+            "{image} is still running 10 s after the kill"
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    Ok(())
 }
 
 /// Starts a process from a snapshot again, without a window, not waiting for it. It gets no
@@ -90,8 +108,7 @@ pub fn spawn_detached(proc: &Proc) -> anyhow::Result<()> {
     cmd.args(&proc.args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(exec::CREATE_NO_WINDOW);
+        .stderr(Stdio::null());
     if let Some(dir) = exe.parent() {
         cmd.current_dir(dir);
     }
@@ -111,16 +128,37 @@ pub struct Winws {
 }
 
 impl Winws {
-    /// `"<exe>" <tail>` in `cwd`, no window: Flowseal's `bin\winws.exe` from `bin`, zapret2's
-    /// `winws2.exe` from its root.
+    /// `"<exe>" <tail>` in `cwd`: Flowseal's `bin\winws.exe` from `bin`, zapret2's `winws2.exe`
+    /// from its root. A tail with the Windows `cmd /c "..."` shape runs as `sh -c "..."`.
     pub fn start(exe: &Path, cwd: &Path, tail: &str) -> std::io::Result<Self> {
-        let mut child = Command::new(exe)
-            .raw_arg(tail)
+        let trimmed = tail.trim_start();
+        let shell_c = trimmed.len() > 3
+            && trimmed[..2].eq_ignore_ascii_case("/c")
+            && trimmed[2..].starts_with(|c: char| c.is_whitespace());
+        let mut command = if shell_c {
+            // `cmd /c "..."`: cmd strips the outer quotes; without them sh handles the rest.
+            let script = trimmed[2..].trim();
+            let unquoted = script
+                .strip_prefix('"')
+                .filter(|rest| rest.ends_with('"'))
+                .map(String::from)
+                .map(|mut rest| {
+                    rest.pop();
+                    rest
+                });
+            let mut sh = Command::new("sh");
+            sh.arg("-c").arg(unquoted.as_deref().unwrap_or(script));
+            sh
+        } else {
+            let mut cmd = Command::new(exe);
+            cmd.args(crate::custom::spawn_tokens(tail));
+            cmd
+        };
+        let mut child = command
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .creation_flags(exec::CREATE_NO_WINDOW)
             .spawn()?;
         let output = Arc::new(Mutex::new(Vec::new()));
         let mut readers = Vec::new();
@@ -146,10 +184,14 @@ impl Winws {
                 }
             }));
         }
-        let image = exe.file_name().map_or_else(
-            || exe.display().to_string(),
-            |name| name.to_string_lossy().into_owned(),
-        );
+        let image = if shell_c {
+            "sh".to_owned()
+        } else {
+            exe.file_name().map_or_else(
+                || exe.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        };
         log::info!(target: "exec", "started {image} (pid {}) {}", child.id(), tail.trim_start());
         Ok(Self {
             child,

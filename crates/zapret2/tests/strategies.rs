@@ -128,18 +128,21 @@ fn a_byte_order_mark_does_not_turn_the_first_comment_into_arguments() {
 
 #[test]
 fn a_file_that_cannot_be_read_is_skipped_and_the_rest_still_works() {
-    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
     let data = tempfile::tempdir().unwrap();
     for name in ["mine", "locked"] {
         strategies::write(data.path(), name, "--wf-tcp-out=443\n").unwrap();
     }
-    // Held with no sharing, as an editor or a scanner may: every other open fails (os error 32).
+    // Held with no permission to read, as a scanner with an exclusive lock may: every open fails.
     let locked = strategies::dir(data.path()).join("locked.txt");
-    let held = fs::OpenOptions::new()
-        .read(true)
-        .share_mode(0)
-        .open(&locked)
-        .unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o200)).unwrap();
+    struct Restorer(std::path::PathBuf);
+    impl Drop for Restorer {
+        fn drop(&mut self) {
+            std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    }
+    let held = Restorer(locked.clone());
     assert!(fs::read(&locked).is_err());
     // The built-in ones, then these of the user's.
     let listed = |users: &[&str]| -> Vec<(String, bool)> {
@@ -164,18 +167,20 @@ fn the_command_line_fills_every_placeholder() {
     let flowseal = dir.path().join("Flowseal zapret");
     let folder = common::fake_flowseal(&flowseal, &[]);
     let text = "--wf-tcp-out=443,%GameFilterTCP% --wf-udp-out=443,%GameFilterUDP%\n\
-                --lua-init=@\"%LUA%zapret-lib.lua\" --blob=a:@\"%FILES%fake\\a.bin\"\n\
+                --lua-init=@\"%LUA%zapret-lib.lua\" --blob=a:@\"%FILES%fake/a.bin\"\n\
                 --hostlist=\"%LISTS%list-general.txt\" --blob=b:@\"%bin%stun.bin\" --filter-tcp=%GameFilter%";
     let root = engine.root().display().to_string();
-    let lists = flowseal.join("lists").display().to_string();
-    let bin = flowseal.join("bin").display().to_string();
     let line = tail(&engine, Some(&folder), text).unwrap();
     assert_eq!(
         line,
         format!(
             "--chdir=\"{root}\" --wf-tcp-out=443,12 --wf-udp-out=443,12 \
-             --lua-init=@\"{root}\\lua\\zapret-lib.lua\" --blob=a:@\"{root}\\files\\fake\\a.bin\" \
-             --hostlist=\"{lists}\\list-general.txt\" --blob=b:@\"{bin}\\stun.bin\" --filter-tcp=12"
+             --lua-init=@\"{}\" --blob=a:@\"{}\" \
+             --hostlist=\"{}\" --blob=b:@\"{}\" --filter-tcp=12",
+            engine.root().join("lua/zapret-lib.lua").display(),
+            engine.root().join("files/fake/a.bin").display(),
+            flowseal.join("lists/list-general.txt").display(),
+            flowseal.join("bin/stun.bin").display(),
         )
     );
     let tokens = zapret::custom::quoted_tokens(&line);
@@ -183,7 +188,10 @@ fn the_command_line_fills_every_placeholder() {
     assert_eq!(tokens[0], format!("--chdir=\"{root}\""));
     assert_eq!(
         tokens[5],
-        format!("--hostlist=\"{lists}\\list-general.txt\"")
+        format!(
+            "--hostlist=\"{}\"",
+            flowseal.join("lists/list-general.txt").display()
+        )
     );
     zapret::game_filter::write(
         &folder,
@@ -370,7 +378,7 @@ fn every_built_in_strategy_passes_the_static_check_and_names_files_that_exist() 
             .split('"')
             .skip(1)
             .step_by(2)
-            .filter(|quoted| quoted.contains(":\\"))
+            .filter(|quoted| Path::new(quoted).is_absolute())
             .collect();
         assert!(paths.len() > 10, "{}: {paths:?}", strategy.name);
         for path in paths {

@@ -9,11 +9,8 @@ use crate::packet::{ACK, FIN, RST, SYN, Tcp};
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpStream};
-use std::os::windows::io::AsRawSocket;
+use std::os::unix::io::AsRawFd as _;
 use std::time::{Duration, Instant};
-use windows::Win32::Networking::WinSock::{
-    LINGER as SockLinger, SO_LINGER, SOCKET, SOL_SOCKET, setsockopt,
-};
 
 pub const IDLE: Duration = Duration::from_secs(120);
 /// After FIN both ways or an RST, for the last ACK.
@@ -248,21 +245,20 @@ pub fn pipe(
 
 /// Closes `stream` with a zero linger, so the peer gets an RST.
 pub fn reset(stream: TcpStream) {
-    let linger = SockLinger {
+    // `{l_onoff: 1, l_linger: 0}`: a close sends RST instead of the lingering FIN handshake.
+    let linger = libc::linger {
         l_onoff: 1,
         l_linger: 0,
     };
-    // SAFETY: `stream` owns a live socket for the call; the slice covers exactly the bytes of
-    // `linger`, a plain struct that outlives it, as `setsockopt(SO_LINGER)` expects. A failure
-    // only leaves the normal close.
+    // SAFETY: `stream` owns a live socket for the call; the pointer covers exactly the bytes of
+    // `linger`. A failure only leaves the normal close.
     unsafe {
-        let bytes =
-            std::slice::from_raw_parts((&raw const linger).cast::<u8>(), size_of::<SockLinger>());
-        setsockopt(
-            SOCKET(stream.as_raw_socket() as usize),
-            SOL_SOCKET,
-            SO_LINGER,
-            Some(bytes),
+        let _ = libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&raw const linger).cast(),
+            size_of::<libc::linger>() as u32,
         );
     }
     drop(stream);

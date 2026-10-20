@@ -1044,18 +1044,38 @@ fn compact(run: &TestRun) -> Value {
     })
 }
 
-/// `{"app": <version>}` once the app answers; when it is not running, its autostart task starts
+/// The `Exec=` line of the desktop autostart entry: the app and its arguments.
+fn autostart_exec() -> Option<(String, Vec<String>)> {
+    let desktop = std::env::home_dir()?.join(".config/autostart/zapret-hub.desktop");
+    let text = std::fs::read_to_string(desktop).ok()?;
+    for line in text.lines() {
+        if let Some(exec) = line.strip_prefix("Exec=") {
+            let mut parts = exec.split_whitespace();
+            let opener = parts.next()?.to_owned();
+            return Some((opener, parts.map(str::to_owned).collect()));
+        }
+    }
+    None
+}
+
+/// `{"app": <version>}` once the app answers; when it is not running, its autostart entry starts
 /// it first (spec 4).
 fn start() -> Result<Done, Fail> {
     let started = |version| Done::Json(json!({ "app": version }));
     if let Some(version) = running()? {
         return Ok(started(version));
     }
+    // The autostart entry is a system user unit; without one, run the desktop launcher's Exec.
     let ran = exec::run(
-        Process::new("schtasks.exe").args(["/Run", "/TN", cli::AUTOSTART_TASK]),
+        Process::new("systemctl").args(["--user", "start", "zapret-hub.service"]),
         START_WAIT,
         None,
-    );
+    )
+    .or_else(|err| {
+        autostart_exec()
+            .map(|(opener, exe)| exec::run(Process::new(&opener).args(exe), START_WAIT, None))
+            .unwrap_or(Err(err))
+    });
     if let Err(err) = ran
         .map_err(anyhow::Error::from)
         .and_then(exec::Output::check)

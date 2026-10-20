@@ -4,7 +4,7 @@ use router::divert::{
 };
 use router::rules::{self, Preset, Protocol, Rule, Table};
 use std::net::Ipv4Addr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn rule(ports: &[&str], ips: &[&str]) -> Rule {
     Rule {
@@ -289,8 +289,8 @@ fn many_ports_still_fit_the_budget() {
 fn the_dll_comes_from_the_running_engine() {
     let flowseal = Path::new(r"E:\Zapret");
     let winws2 = Path::new(r"D:\zapret2\binaries\windows-x86_64");
-    let fs_dll = PathBuf::from(r"E:\Zapret\bin\WinDivert.dll");
-    let z2_dll = PathBuf::from(r"D:\zapret2\binaries\windows-x86_64\WinDivert.dll");
+    let fs_dll = flowseal.join("bin").join("WinDivert.dll");
+    let z2_dll = winws2.join("WinDivert.dll");
     let all = |_: &Path| true;
     assert_eq!(
         pick_dll(Some(Engine::Zapret2), Some(flowseal), Some(winws2), all).unwrap(),
@@ -318,7 +318,7 @@ fn the_dll_comes_from_the_running_engine() {
     )
     .unwrap_err();
     assert!(
-        format!("{err:#}").contains(r"E:\Zapret\bin\WinDivert.dll"),
+        format!("{err:#}").contains(fs_dll.to_string_lossy().as_ref()),
         "no fallback for a running engine: {err:#}"
     );
     assert!(pick_dll(None, None, None, all).is_err());

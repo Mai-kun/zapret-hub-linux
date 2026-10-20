@@ -448,8 +448,8 @@ mod tests {
         for file in [
             "service.bat",
             "general (ALT11).bat",
-            r"bin\winws.exe",
-            r"bin\WinDivert64.sys",
+            "bin/winws.exe",
+            "bin/WinDivert64.sys",
         ] {
             std::fs::write(root.join(file), "").unwrap();
         }

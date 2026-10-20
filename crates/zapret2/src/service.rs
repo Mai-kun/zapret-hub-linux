@@ -2,7 +2,6 @@
 //! does the `sc` work; this module knows what zapret2 needs from it.
 
 use anyhow::Context as _;
-use std::os::windows::process::CommandExt as _;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -58,7 +57,8 @@ pub fn validate(engine: &Engine, tail: &str) -> anyhow::Result<()> {
 
 fn run(engine: &Engine, args: &str) -> anyhow::Result<exec::Output> {
     let mut cmd = Command::new(engine.exe());
-    cmd.raw_arg(args).current_dir(engine.root());
+    cmd.args(zapret::custom::spawn_tokens(args))
+        .current_dir(engine.root());
     exec::run(&mut cmd, Duration::from_secs(30), None)
         .with_context(|| format!("starting {} {args}", engine.exe().display()))
 }

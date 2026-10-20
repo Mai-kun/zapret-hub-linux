@@ -1,4 +1,4 @@
-//! Every external program Zapret Hub starts goes through [`run`]: no console window, a hard
+//! Every external program Zapret Hub starts goes through [`run`]: a hard
 //! timeout, an optional cancel flag, and one journal entry with the whole output (spec 10).
 
 mod time;
@@ -6,22 +6,13 @@ mod time;
 pub use time::LocalTime;
 
 use std::io::Read;
-use std::os::windows::io::AsRawHandle as _;
-use std::os::windows::process::CommandExt as _;
-use std::process::{Child, Command, Stdio};
+use std::os::unix::process::CommandExt as _;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
-};
-
-/// `CREATE_NO_WINDOW`: console programs (sc, netsh, curl, winws) must not flash a window.
-pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use libc::SIGKILL;
 
 /// What a finished, or killed, program left behind.
 #[derive(Debug, Clone)]
@@ -80,11 +71,12 @@ pub fn run(
 ) -> std::io::Result<Output> {
     let command = command_line(cmd);
     let started = Instant::now();
+    // Its own process group, so a `killpid(-pid)` ends the forks and grandchildren too.
     let spawned = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW)
+        .process_group(0)
         .spawn();
     let mut child = match spawned {
         Ok(child) => child,
@@ -93,16 +85,10 @@ pub fn run(
             return Err(err);
         }
     };
-    // ponytail: a grandchild started before this assignment escapes the job; CREATE_SUSPENDED fixes it
-    let job = match Job::holding(&child) {
-        Ok(job) => Some(job),
-        Err(err) => {
-            log::warn!(
-                target: "exec",
-                "{command} -> no job object, a timeout ends only the program itself: {err}"
-            );
-            None
-        }
+    let group_pid = -(child.id() as i32);
+    let killpid = |signal: libc::c_int| {
+        // SAFETY: the group stays alive while `child` is not reaped, and -pid is just a number.
+        let _ = unsafe { libc::kill(group_pid, signal) };
     };
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
@@ -114,16 +100,15 @@ pub fn run(
         canceled = cancel.is_some_and(|flag| flag.load(Ordering::Relaxed));
         timed_out = started.elapsed() >= timeout;
         if canceled || timed_out {
-            let _ = child.kill();
+            killpid(SIGKILL);
             let _ = child.wait();
             break None;
         }
         std::thread::sleep(Duration::from_millis(20));
     };
     // Whatever the program started and left running keeps the pipes open, and `join` below waiting.
-    if let Some(job) = &job {
-        job.terminate();
-    }
+    killpid(SIGKILL);
+    let _ = child.wait();
     let output = Output {
         command,
         code: status.and_then(|status| status.code()),
@@ -156,47 +141,8 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
     })
 }
 
-/// A job object holding a started program and everything it starts. Closing it ends them all
-/// (`KILL_ON_JOB_CLOSE`), so even a crash of ours leaves no orphan behind.
-struct Job(HANDLE);
-
-impl Job {
-    /// A new job with `child` already in it.
-    fn holding(child: &Child) -> windows::core::Result<Self> {
-        // SAFETY: no security attributes and no name; the handle is owned by the `Job` built here.
-        let job = Self(unsafe { CreateJobObjectW(None, windows::core::PCWSTR::null())? });
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: `limits` is the structure this information class takes, and the size is its own;
-        // the process handle stays valid while `child` is borrowed.
-        unsafe {
-            SetInformationJobObject(
-                job.0,
-                JobObjectExtendedLimitInformation,
-                (&raw const limits).cast(),
-                size_of_val(&limits) as u32,
-            )?;
-            AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle()))?;
-        }
-        Ok(job)
-    }
-
-    /// Ends every process in the job at once.
-    fn terminate(&self) {
-        // SAFETY: the handle is a live job object, owned by `self`.
-        let _ = unsafe { TerminateJobObject(self.0, 1) };
-    }
-}
-
-impl Drop for Job {
-    fn drop(&mut self) {
-        // SAFETY: the handle is closed here and nowhere else.
-        let _ = unsafe { CloseHandle(self.0) };
-    }
-}
-
-/// Console programs write UTF-8, UTF-16 (some system tools when redirected) or the OEM code
-/// page (cp866 on Russian Windows); this reads all three.
+/// Console programs write UTF-8, UTF-16 (some system tools when redirected) or their legacy
+/// single-byte code page; this reads the first two and falls back to lossy UTF-8.
 pub fn decode(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         return utf16le(rest);
@@ -205,10 +151,7 @@ pub fn decode(bytes: &[u8]) -> String {
     if bytes.len() >= 4 && bytes.len().is_multiple_of(2) && odd_zeros * 4 > bytes.len() {
         return utf16le(bytes);
     }
-    match std::str::from_utf8(bytes) {
-        Ok(text) => text.to_owned(),
-        Err(_) => oem(bytes),
-    }
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn utf16le(bytes: &[u8]) -> String {
@@ -219,20 +162,4 @@ fn utf16le(bytes: &[u8]) -> String {
         .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     String::from_utf16_lossy(&units)
-}
-
-fn oem(bytes: &[u8]) -> String {
-    use windows::Win32::Globalization::{
-        CP_OEMCP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar,
-    };
-    let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
-    // SAFETY: valid slices; the first call only measures.
-    let len = unsafe { MultiByteToWideChar(CP_OEMCP, flags, bytes, None) };
-    if len <= 0 {
-        return String::from_utf8_lossy(bytes).into_owned();
-    }
-    let mut wide = vec![0u16; len as usize];
-    // SAFETY: `wide` is exactly as long as the first call asked for.
-    unsafe { MultiByteToWideChar(CP_OEMCP, flags, bytes, Some(&mut wide)) };
-    String::from_utf16_lossy(&wide)
 }

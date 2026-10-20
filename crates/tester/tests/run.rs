@@ -1,4 +1,4 @@
-use std::os::windows::process::ExitStatusExt as _;
+use std::os::unix::process::ExitStatusExt as _;
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -45,7 +45,8 @@ fn winws2_that_died_or_printed_a_lua_error_did_not_run_the_strategy() {
     let ready = "windivert initialized. capture is started.\n";
     assert_eq!(lua_failure(None, ready), None);
     let died = lua_failure(
-        Some(ExitStatus::from_raw(87)),
+        // In the wait-status encoding: exit 87.
+        Some(ExitStatus::from_raw(87 << 8)),
         "LUA ERROR: desync function 'fakee' does not exist\n",
     )
     .unwrap();
@@ -70,6 +71,12 @@ fn zapret2_strategies_need_a_working_engine_before_the_run_starts() {
     ] {
         std::fs::write(engine_dir.path().join(file), b"").unwrap();
     }
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(
+        engine_dir.path().join("winws2.exe"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     std::fs::create_dir_all(engine_dir.path().join("lua")).unwrap();
     for file in ["zapret-lib.lua", "zapret-antidpi.lua"] {
         std::fs::write(engine_dir.path().join("lua").join(file), "").unwrap();
@@ -94,9 +101,9 @@ fn zapret2_strategies_need_a_working_engine_before_the_run_starts() {
         "{}",
         refusal(None)
     );
-    // An empty winws2.exe cannot tell its version.
+    // An empty winws2.exe cannot tell its version: it is no program (exec format error).
     assert!(
-        refusal(Some(&engine)).contains("os error 193"),
+        refusal(Some(&engine)).contains("os error 8"),
         "{}",
         refusal(Some(&engine))
     );

@@ -173,17 +173,18 @@ pub fn parse_sums(text: &str) -> Vec<(String, String)> {
 
 /// The part of a listed path under the release root, for the files that run: the Windows
 /// binaries and the Lua. The release's own top folder, when listed, is skipped.
-fn checked_path(path: &str) -> Option<&str> {
-    let wanted = |p: &str| p.starts_with("binaries/windows-x86_64/") || p.starts_with("lua/");
-    if wanted(path) {
+fn checked_path(path: &str) -> Option<String> {
+    let path = path.replace('\\', "/");
+    let wanted = |p: &str| p.starts_with("binaries/") || p.starts_with("lua/");
+    if wanted(&path) {
         return Some(path);
     }
     path.split_once('/')
-        .map(|(_, rest)| rest)
+        .map(|(_, rest)| rest.to_owned())
         .filter(|p| wanted(p))
 }
 
-/// Checks every Windows binary and Lua file `sums` lists under `root`; how many were checked.
+/// Checks every engine binary and Lua file `sums` lists under `root`; how many were checked.
 pub fn verify(root: &Path, sums: &str) -> anyhow::Result<usize> {
     let mut checked = 0;
     for (hash, path) in parse_sums(sums) {
@@ -201,7 +202,7 @@ pub fn verify(root: &Path, sums: &str) -> anyhow::Result<usize> {
     }
     anyhow::ensure!(
         checked > 0,
-        "sha256sum.txt lists no Windows binaries or Lua files"
+        "sha256sum.txt lists no engine binaries or Lua files"
     );
     Ok(checked)
 }
@@ -490,11 +491,14 @@ mod tests {
     fn checks_the_binaries_and_lua_against_sha256sum() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let exe = root.join(r"binaries\windows-x86_64\winws2.exe");
+        let exe = root.join("binaries").join("windows-x86_64").join("winws2.exe");
+        let nfqws = root.join("binaries").join("linux-x86_64").join("nfqws2");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(nfqws.parent().unwrap()).unwrap();
         std::fs::create_dir_all(root.join("lua")).unwrap();
         std::fs::write(&exe, "exe").unwrap();
-        std::fs::write(root.join(r"lua\zapret-lib.lua"), "lua").unwrap();
+        std::fs::write(&nfqws, "elsewhere").unwrap();
+        std::fs::write(root.join("lua").join("zapret-lib.lua"), "lua").unwrap();
         let sums = format!(
             "{}  ./zapret2-v0.9.4/binaries/windows-x86_64/winws2.exe\n\
              {} *lua/zapret-lib.lua\n\
@@ -505,8 +509,8 @@ mod tests {
         );
         assert_eq!(
             verify(root, &sums).unwrap(),
-            2,
-            "the linux binary is not checked"
+            3,
+            "the linux binary is checked too"
         );
 
         std::fs::write(&exe, "tampered").unwrap();

@@ -341,7 +341,7 @@ pub fn args(text: &str) -> String {
 /// ends in `\`. `%LISTS%`, `%BIN%` and the game filter come from the Flowseal folder: without one
 /// they are an error.
 pub fn tail(engine: &Engine, folder: Option<&Folder>, text: &str) -> anyhow::Result<String> {
-    let dir = |path: PathBuf| format!("{}\\", path.display());
+    let dir = |path: PathBuf| format!("{}{}", path.display(), std::path::MAIN_SEPARATOR);
     let mut args = args(text);
     for (var, value) in [
         ("%LUA%", dir(engine.lua())),

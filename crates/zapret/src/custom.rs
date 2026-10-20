@@ -1,7 +1,6 @@
 //! Custom strategies (spec 6). A TOML record in `data/strategies/` is the source of truth; a
 //! `general (HUB <name>).bat` in Flowseal's format lets `service.bat` and `test zapret.ps1` use it.
 
-use std::os::windows::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -195,6 +194,15 @@ pub fn quoted_tokens(text: &str) -> Vec<String> {
     tokens
 }
 
+/// `quoted_tokens`, minus the quoting characters: real arguments, not Windows' quoted raw ones.
+pub fn spawn_tokens(text: &str) -> Vec<String> {
+    quoted_tokens(text)
+        .into_iter()
+        .map(|token| token.replace('"', ""))
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
 /// `winws --dry-run <args>` when this winws knows the option; otherwise winws runs for 2 s and
 /// must not exit (spec 6). An error carries winws's whole output.
 pub fn dry_run(folder: &Folder, parsed: &ParsedArgs) -> anyhow::Result<String> {
@@ -204,7 +212,8 @@ pub fn dry_run(folder: &Folder, parsed: &ParsedArgs) -> anyhow::Result<String> {
         .any(|bytes| bytes == b"--dry-run")
     {
         let mut cmd = Command::new(folder.winws());
-        cmd.raw_arg(format!("--dry-run{tail}"))
+        cmd.arg("--dry-run")
+            .args(spawn_tokens(&tail))
             .current_dir(folder.bin());
         let out = exec::run(&mut cmd, Duration::from_secs(15), None)?.check()?;
         return Ok(format!("{}{}", out.stdout, out.stderr));

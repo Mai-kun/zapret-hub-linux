@@ -8,14 +8,7 @@ pub const BEGIN: &str = "# zapret-hub begin";
 pub const END: &str = "# zapret-hub end";
 
 pub fn path() -> PathBuf {
-    let windows = std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    windows
-        .join("System32")
-        .join("drivers")
-        .join("etc")
-        .join("hosts")
+    PathBuf::from("/etc/hosts")
 }
 
 /// Up to date when the first and the last non-empty line of Flowseal's file are in hosts.
@@ -130,7 +123,7 @@ fn read_at(path: &Path) -> anyhow::Result<String> {
 pub fn apply(block: &str) -> anyhow::Result<()> {
     apply_at(&path(), block)?;
     let _ = exec::run(
-        std::process::Command::new("ipconfig").arg("/flushdns"),
+        std::process::Command::new("resolvectl").arg("flush-caches"),
         std::time::Duration::from_secs(15),
         None,
     );

@@ -14,7 +14,6 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
-windows = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper"] }
 
 [dev-dependencies]
 tempfile.workspace = true

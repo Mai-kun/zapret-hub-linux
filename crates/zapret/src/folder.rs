@@ -135,7 +135,6 @@ pub fn find_flowseal(dirs: &[PathBuf]) -> Option<PathBuf> {
 /// Stops listing when `budget` is spent; the order is the order of preference.
 pub fn nearby_dirs(budget: Duration) -> Vec<PathBuf> {
     let deadline = Instant::now() + budget;
-    let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(app) = std::env::current_exe()
         .ok()
@@ -144,21 +143,11 @@ pub fn nearby_dirs(budget: Duration) -> Vec<PathBuf> {
         roots.extend(app.parent().map(Path::to_path_buf));
         roots.push(app);
     }
-    if let Some(home) = var("USERPROFILE") {
+    if let Some(home) = std::env::home_dir() {
         roots.extend(["Downloads", "Desktop", "Documents"].map(|name| home.join(name)));
+        roots.push(home);
     }
-    roots.extend(
-        ["ProgramFiles", "ProgramFiles(x86)"]
-            .iter()
-            .filter_map(|name| var(name)),
-    );
-    // SAFETY: no arguments, no pointers: a bit mask of the drives that exist.
-    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
-    roots.extend(
-        (0..26u8)
-            .filter(|bit| mask >> bit & 1 == 1)
-            .map(|bit| PathBuf::from(format!("{}:\\", char::from(b'A' + bit)))),
-    );
+    roots.extend(["/opt", "/usr/local/share"].map(PathBuf::from));
     expand(&roots, deadline)
 }
 
@@ -193,8 +182,12 @@ mod tests {
     use super::*;
 
     fn flowseal(root: &Path) {
-        for file in ["service.bat", r"bin\winws.exe", r"bin\WinDivert64.sys"] {
-            let path = root.join(file);
+        for (dir, file) in [
+            ("", "service.bat"),
+            ("bin", "winws.exe"),
+            ("bin", "WinDivert64.sys"),
+        ] {
+            let path = root.join(dir).join(file);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "").unwrap();
         }

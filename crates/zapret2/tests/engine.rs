@@ -8,10 +8,10 @@ use zapret2::{Engine, info, parse_banner, required_compat};
 fn winws2_is_found_in_every_layout() {
     for (exe_dir, exe) in [
         ("", "winws2.exe"),
-        ("bin", r"bin\winws2.exe"),
+        ("bin", "bin/winws2.exe"),
         (
-            r"binaries\windows-x86_64",
-            r"binaries\windows-x86_64\winws2.exe",
+            "binaries/windows-x86_64",
+            "binaries/windows-x86_64/winws2.exe",
         ),
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -33,10 +33,10 @@ fn the_bundle_root_is_its_zapret_winws_folder() {
 }
 
 #[test]
-fn a_trailing_backslash_is_not_part_of_the_root() {
+fn a_trailing_separator_is_not_part_of_the_root() {
     let dir = tempfile::tempdir().unwrap();
     common::fake_engine(dir.path(), "", common::LIB);
-    let picked = format!(r"{}\", dir.path().display());
+    let picked = format!("{}{}", dir.path().display(), std::path::MAIN_SEPARATOR);
     let engine = Engine::open(&picked).unwrap();
     assert_eq!(engine.root().as_os_str(), dir.path().as_os_str());
 }
@@ -52,8 +52,8 @@ fn every_missing_file_is_named() {
     for part in [
         "is not a zapret2 folder",
         "winws2.exe",
-        r"lua\zapret-lib.lua",
-        r"lua\zapret-antidpi.lua",
+        &format!("lua{}zapret-lib.lua", std::path::MAIN_SEPARATOR),
+        &format!("lua{}zapret-antidpi.lua", std::path::MAIN_SEPARATOR),
     ] {
         assert!(err.contains(part), "{part}: {err}");
     }
@@ -61,8 +61,9 @@ fn every_missing_file_is_named() {
     std::fs::remove_file(dir.path().join("bin").join("cygwin1.dll")).unwrap();
     std::fs::remove_file(dir.path().join("bin").join("WinDivert64.sys")).unwrap();
     let err = error(dir.path());
+    let s = std::path::MAIN_SEPARATOR;
     assert!(
-        err.ends_with(r"missing bin\cygwin1.dll, bin\WinDivert64.sys"),
+        err.ends_with(&format!("missing bin{s}cygwin1.dll, bin{s}WinDivert64.sys")),
         "{err}"
     );
 }
@@ -76,18 +77,11 @@ fn a_cyrillic_path_is_refused() {
 }
 
 #[test]
-fn a_drive_root_is_refused() {
-    // `--chdir="C:\"` ends in `\"`, which winws2 reads as an escaped quote: no strategy would pass.
-    let temp = std::env::temp_dir();
-    let Some(std::path::Component::Prefix(drive)) = temp.components().next() else {
-        panic!("{} has no drive", temp.display());
-    };
-    let root = format!(r"{}\", drive.as_os_str().to_string_lossy());
-    let err = error(Path::new(&root));
-    assert!(
-        err.contains(&root) && err.contains("put zapret2 in a folder"),
-        "{err}"
-    );
+fn a_root_folder_is_refused() {
+    // `/` has no parent folder either: the engine's quote could go right after its separator.
+    let root = std::path::Path::new("/");
+    let err = error(root);
+    assert!(err.contains(root.display().to_string().as_str()) && err.contains("put zapret2 in a folder"), "{err}");
 }
 
 #[test]
@@ -142,11 +136,11 @@ fn a_start_that_fails_names_the_exe() {
     let dir = tempfile::tempdir().unwrap();
     common::fake_engine(dir.path(), "", common::LIB);
     let engine = Engine::open(dir.path()).unwrap();
-    // An empty winws2.exe is no program: Windows refuses to start it (os error 193).
+    // An empty winws2.exe is no program: the system refuses to start it (exec format error).
     let err = engine.version().unwrap_err().to_string();
     let exe = engine.exe().display().to_string();
     assert!(err.contains(&exe), "the error names the exe: {err}");
-    assert!(err.contains("(os error 193)"), "and keeps its cause: {err}");
+    assert!(err.contains("(os error 8)"), "and keeps its cause: {err}");
     let shown = info(Some(&dir.path().display().to_string()));
     assert_eq!(shown.error, Some(err), "the same text reaches Info");
 }

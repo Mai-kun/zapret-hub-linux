@@ -2,8 +2,9 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "windows")]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
@@ -53,10 +54,10 @@ pub struct CheckResult {
     pub stderr: String,
 }
 
-/// `-I -s -m 4 --connect-timeout 2 -o NUL -w "%{http_code} %{time_total}" --show-error`, then the
+/// `-I -s -m 4 --connect-timeout 2 -o /dev/null -w "%{http_code} %{time_total}" --show-error`, then the
 /// kind's arguments and the URL. Only `%{time_total}` is added to the script's request.
 pub fn check(url: &str, kind: CheckKind, cancel: Option<&AtomicBool>) -> CheckResult {
-    let mut cmd = Command::new("curl.exe");
+    let mut cmd = Command::new("curl");
     cmd.args([
         "-I",
         "-s",
@@ -65,7 +66,7 @@ pub fn check(url: &str, kind: CheckKind, cancel: Option<&AtomicBool>) -> CheckRe
         "--connect-timeout",
         "2",
         "-o",
-        "NUL",
+        "/dev/null",
         "-w",
         "%{http_code} %{time_total}",
         "--show-error",
@@ -176,13 +177,13 @@ pub fn dpi_check(
     payload: &Path,
     cancel: Option<&AtomicBool>,
 ) -> DpiResult {
-    let mut cmd = Command::new("curl.exe");
+    let mut cmd = Command::new("curl");
     cmd.args(["--range", "0-65535", "-m", "5", "--connect-timeout", "3"])
         .args([
             "-w",
             "%{http_code} %{size_upload} %{size_download} %{time_total}",
             "-o",
-            "NUL",
+            "/dev/null",
             "-X",
             "POST",
         ])
@@ -272,19 +273,24 @@ pub fn write_payload(path: &Path) -> std::io::Result<()> {
 /// Windows 10 1803+ ships `curl.exe`; tests and updates need it.
 pub fn available() -> bool {
     exec::run(
-        Command::new("curl.exe").arg("--version"),
+        Command::new("curl").arg("--version"),
         Duration::from_secs(10),
         None,
     )
     .is_ok_and(|out| out.success())
 }
 
-/// `--ssl-no-revoke` for an old libcurl 7, `--ssl-revoke-best-effort` otherwise, as `:ipset_update` picks.
-fn revoke_flag() -> &'static str {
+/// `--ssl-no-revoke` for an old libcurl 7, `--ssl-revoke-best-effort` otherwise — both Windows
+/// (schannel) options; as `:ipset_update` picks. Other platforms need no revocation flag.
+fn revoke_flag() -> Option<&'static str> {
+    #[cfg(not(target_os = "windows"))]
+    return None;
+    #[cfg(target_os = "windows")]
     static FLAG: OnceLock<&'static str> = OnceLock::new();
+    #[cfg(target_os = "windows")]
     FLAG.get_or_init(|| {
         let version = exec::run(
-            Command::new("curl.exe").arg("--version"),
+            Command::new("curl").arg("--version"),
             Duration::from_secs(10),
             None,
         )
@@ -296,11 +302,12 @@ fn revoke_flag() -> &'static str {
             "--ssl-revoke-best-effort"
         }
     })
+    .into()
 }
 
 /// `-L -f -s -S`, a 10 s connect timeout, the revocation flag, `no-cache`, through `socks5` when given.
 pub fn get(url: &str, socks5: Option<&str>) -> Command {
-    let mut cmd = Command::new("curl.exe");
+    let mut cmd = Command::new("curl");
     cmd.args([
         "-L",
         "-f",
@@ -308,10 +315,11 @@ pub fn get(url: &str, socks5: Option<&str>) -> Command {
         "-S",
         "--connect-timeout",
         "10",
-        revoke_flag(),
-        "-H",
-        "Cache-Control: no-cache",
     ]);
+    if let Some(flag) = revoke_flag() {
+        cmd.arg(flag);
+    }
+    cmd.args(["-H", "Cache-Control: no-cache"]);
     if let Some(proxy) = socks5 {
         cmd.args(["--socks5-hostname", proxy]);
     }

@@ -575,13 +575,13 @@ dependencies = [
  "anyhow",
  "clap",
  "exec",
+ "libc",
  "probe",
  "router",
  "serde",
  "serde_json",
  "tempfile",
  "tester",
- "windows",
  "zapret",
 ]
 
@@ -1099,8 +1099,8 @@ name = "exec"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "libc",
  "log",
- "windows",
 ]
 
 [[package]]
@@ -2771,7 +2771,6 @@ dependencies = [
  "serde_json",
  "specta",
  "tempfile",
- "windows",
 ]
 
 [[package]]
@@ -3003,12 +3002,12 @@ name = "router"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "libc",
  "log",
  "serde",
  "specta",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
- "windows",
 ]
 
 [[package]]
@@ -4772,17 +4771,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-registry"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02752bf7fbdcce7f2a27a742f798510f3e5ad88dbe84871e5168e2120c3d5720"
-dependencies = [
- "windows-link",
- "windows-result",
- "windows-strings",
-]
-
-[[package]]
 name = "windows-result"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5101,6 +5089,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "exec",
+ "libc",
  "log",
  "probe",
  "serde",
@@ -5110,8 +5099,6 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
- "windows",
- "windows-registry",
 ]
 
 [[package]]
@@ -5136,8 +5123,6 @@ dependencies = [
  "tempfile",
  "tester",
  "toml 1.1.8+spec-1.1.0",
- "windows",
- "windows-registry",
  "zapret",
  "zapret2",
 ]

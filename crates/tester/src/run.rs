@@ -92,7 +92,7 @@ pub fn run(
     let zapret2_version = zapret2_version(engine2, request)?;
     anyhow::ensure!(
         probe::curl::available(),
-        "curl.exe was not found: the tests need Windows 10 1803 or newer"
+        "curl was not found: the tests need the system's curl",
     );
     let id = exec::LocalTime::now().stamp();
     // A Cancel or Exit while the DPI suite downloads: zapret is not touched at all.

@@ -23,14 +23,33 @@ pub fn folder(dir: &tempfile::TempDir) -> zapret::folder::Folder {
     zapret::folder::Folder::open(dir.path()).unwrap()
 }
 
-/// Holds `path` open the way a virus scanner or an editor might: others may write it, but not
-/// read it, until the handle is dropped.
-pub fn lock_reads(path: &std::path::Path) -> fs::File {
-    use std::os::windows::fs::OpenOptionsExt as _;
-    const FILE_SHARE_WRITE: u32 = 2;
-    fs::OpenOptions::new()
-        .write(true)
-        .share_mode(FILE_SHARE_WRITE)
-        .open(path)
-        .unwrap()
+/// Keeps `path` the way a virus scanner or an editor with no sharing might: nothing else may
+/// open it for reading until the lock is dropped.
+pub struct LockReads {
+    path: std::path::PathBuf,
+}
+
+impl Drop for LockReads {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut restored = match fs::metadata(&self.path) {
+            Ok(meta) => meta.permissions(),
+            Err(_) => return,
+        };
+        restored.set_mode(0o644);
+        let _ = fs::set_permissions(&self.path, restored);
+    }
+}
+
+pub fn lock_reads(path: &std::path::Path) -> LockReads {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut denied = match fs::metadata(path) {
+        Ok(meta) => meta.permissions(),
+        Err(err) => panic!("lock_reads: {err}"),
+    };
+    denied.set_mode(0o200); // write-only: reads fail until it is dropped
+    fs::set_permissions(path, denied).unwrap();
+    LockReads {
+        path: path.to_path_buf(),
+    }
 }

@@ -24,7 +24,7 @@ pub fn strip_prefix(name: &str) -> Option<&str> {
 }
 
 /// Where `winws2.exe` may be under the root: zapret-win-bundle, a `bin\`, the release zip.
-const EXE_DIRS: [&str; 3] = ["", "bin", r"binaries\windows-x86_64"];
+const EXE_DIRS: [&str; 3] = ["", "bin", "binaries/windows-x86_64"];
 /// What `winws2.exe` needs next to it.
 const BESIDE_EXE: [&str; 3] = ["cygwin1.dll", "WinDivert.dll", "WinDivert64.sys"];
 /// What every strategy loads from `lua\`.
@@ -77,9 +77,18 @@ impl Engine {
             .iter()
             .map(|sub| root.join(sub))
             .find(|dir| dir.join("winws2.exe").is_file());
+        // The Linux build of zapret2 is self-contained: `nfqws2` alone is enough.
+        let nfqws_dir = if exe_dir.is_some() {
+            None
+        } else {
+            EXE_DIRS
+                .iter()
+                .map(|sub| root.join(sub))
+                .find(|dir| dir.join("nfqws2").is_file())
+        };
         let mut missing = Vec::new();
-        match &exe_dir {
-            Some(exe_dir) => {
+        match (&exe_dir, &nfqws_dir) {
+            (Some(exe_dir), _) => {
                 let sub = exe_dir.strip_prefix(&root).unwrap_or(exe_dir);
                 for file in BESIDE_EXE {
                     if !exe_dir.join(file).is_file() {
@@ -87,7 +96,10 @@ impl Engine {
                     }
                 }
             }
-            None => missing.push("winws2.exe".to_owned()),
+            (None, Some(dir)) => {
+                let _ = dir;
+            }
+            (None, None) => missing.push("winws2.exe".to_owned()),
         }
         for file in LUA_FILES {
             let path = Path::new("lua").join(file);
@@ -95,8 +107,9 @@ impl Engine {
                 missing.push(path.display().to_string());
             }
         }
-        let exe = match exe_dir {
-            Some(exe_dir) if missing.is_empty() => exe_dir.join("winws2.exe"),
+        let exe = match (&exe_dir, &nfqws_dir) {
+            (Some(exe_dir), _) if missing.is_empty() => exe_dir.join("winws2.exe"),
+            (None, Some(dir)) if missing.is_empty() => dir.join("nfqws2"),
             _ => anyhow::bail!(
                 "{} is not a zapret2 folder: missing {}",
                 root.display(),
@@ -231,9 +244,11 @@ pub fn looks_like_zapret2(dir: &Path) -> bool {
         .iter()
         .any(|root| {
             root.join("lua").join("zapret-lib.lua").is_file()
-                && EXE_DIRS
-                    .iter()
-                    .any(|sub| root.join(sub).join("winws2.exe").is_file())
+                && EXE_DIRS.iter().any(|sub| {
+                    [root.join(sub).join("winws2.exe"), root.join(sub).join("nfqws2")]
+                        .iter()
+                        .any(|exe| exe.is_file())
+                })
         })
 }
 
@@ -272,10 +287,10 @@ mod tests {
         let bundle = tmp.path().join("bundle");
         let empty = tmp.path().join("empty");
         std::fs::create_dir_all(&empty).unwrap();
-        touch(&release.join(r"binaries\windows-x86_64\winws2.exe"));
-        touch(&release.join(r"lua\zapret-lib.lua"));
-        touch(&bundle.join(r"zapret-winws\winws2.exe"));
-        touch(&bundle.join(r"zapret-winws\lua\zapret-lib.lua"));
+        touch(&release.join("binaries/windows-x86_64/winws2.exe"));
+        touch(&release.join("lua/zapret-lib.lua"));
+        touch(&bundle.join("zapret-winws/winws2.exe"));
+        touch(&bundle.join("zapret-winws/lua/zapret-lib.lua"));
         assert!(looks_like_zapret2(&release) && looks_like_zapret2(&bundle));
         assert!(!looks_like_zapret2(&empty));
         assert_eq!(

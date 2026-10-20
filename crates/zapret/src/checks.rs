@@ -308,25 +308,33 @@ fn has_driver(folder: &Folder) -> bool {
     })
 }
 
-/// `ProxyServer` when `ProxyEnable` is 1 in the user's Internet Settings.
+/// The proxy from the environment: `ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY`, as `curl` picks.
 fn proxy_server() -> Option<String> {
-    let key = windows_registry::CURRENT_USER
-        .open(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
-        .ok()?;
-    (key.get_u32("ProxyEnable").ok()? == 1)
-        .then(|| key.get_string("ProxyServer").unwrap_or_default())
+    for name in ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"] {
+        if let Ok(value) = std::env::var(name)
+            && !value.is_empty()
+        {
+            return Some(value);
+        }
+    }
+    None
 }
 
-/// A `DohFlags` above zero anywhere under the DNS client's per-interface settings.
+/// `DNSOverTLS=yes` anywhere in `/etc/systemd/resolved.conf` or its drop-ins: the system itself
+/// encrypts DNS, so the DNS sniffer sees no answers.
 fn doh_configured() -> bool {
-    fn search(key: &windows_registry::Key, depth: u8) -> bool {
-        key.get_u64("DohFlags").is_ok_and(|flags| flags > 0)
-            || (depth > 0
-                && key.keys().is_ok_and(|mut names| {
-                    names.any(|name| key.open(&name).is_ok_and(|sub| search(&sub, depth - 1)))
-                }))
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/etc/systemd/resolved.conf.d") {
+        files.extend(entries.flatten().map(|entry| entry.path()));
     }
-    windows_registry::LOCAL_MACHINE
-        .open(r"SYSTEM\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters")
-        .is_ok_and(|key| search(&key, 6))
+    files.push("/etc/systemd/resolved.conf".into());
+    files.iter().any(|file| {
+        std::fs::read_to_string(file)
+            .is_ok_and(|text| {
+                text.lines().any(|line| {
+                    let line = line.split('#').next().unwrap_or("").trim();
+                    line.eq_ignore_ascii_case("DNSOverTLS=yes")
+                })
+            })
+    })
 }

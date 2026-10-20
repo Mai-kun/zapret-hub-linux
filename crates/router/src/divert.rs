@@ -316,9 +316,6 @@ impl Address {
 
 use std::ffi::{c_char, c_void};
 use std::sync::{Mutex, OnceLock};
-use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-use windows::core::{HSTRING, PCSTR};
 
 type OpenFn = unsafe extern "C" fn(*const c_char, i32, i16, u64) -> *mut c_void;
 type RecvFn = unsafe extern "C" fn(*mut c_void, *mut c_void, u32, *mut u32, *mut Address) -> i32;
@@ -364,15 +361,34 @@ impl Dll {
         if let Some(dll) = loaded.get(path) {
             return Ok(dll.clone());
         }
-        // SAFETY: a plain library load of a full path; WinDivert.dll has no unsafe load-time contract.
-        let module = unsafe { LoadLibraryW(&HSTRING::from(path.as_os_str())) }
+        // SAFETY: a plain library load of a full path; WinDivert has no unsafe load-time contract.
+        let file = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
             .map_err(|e| anyhow::anyhow!("cannot load {}: {e}", path.display()))?;
+        // SAFETY: `file` is a NUL-terminated path; the handle stays valid for `sym` below.
+        let module = unsafe { libc::dlopen(file.as_ptr(), libc::RTLD_NOW) };
+        let module = match module {
+            module if !module.is_null() => Ok(module),
+            _ => {
+                // The error of a missing file names it, like the Windows variant did.
+                if !path.is_file() {
+                    Err(anyhow::anyhow!(
+                        "cannot load {}: file not found",
+                        path.display()
+                    ))
+                } else {
+                    // SAFETY: dlerror needs no argument; the string it points to is static.
+                    let reason = unsafe { std::ffi::CStr::from_ptr(libc::dlerror()) }
+                        .to_string_lossy();
+                    Err(anyhow::anyhow!("cannot load {}: {reason}", path.display()))
+                }
+            }
+        }?;
         let sym = |name: &'static str| -> Result<*const c_void> {
             let c = format!("{name}\0");
             // SAFETY: `module` is a live module handle and `c` is NUL-terminated.
-            match unsafe { GetProcAddress(module, PCSTR(c.as_ptr())) } {
-                Some(f) => Ok(f as *const c_void),
-                None => bail!("{} has no {name}: is it WinDivert 2.x?", path.display()),
+            match unsafe { libc::dlsym(module, c.as_ptr().cast()) } {
+                f if !f.is_null() => Ok(f),
+                _ => bail!("{} has no {name}: is it WinDivert 2.x?", path.display()),
             }
         };
         // SAFETY: the signatures are those of WinDivert 2.2's exported functions.
@@ -449,7 +465,8 @@ impl Handle {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         // SAFETY: `f` is NUL-terminated and outlives the call.
         let raw = unsafe { (dll.open)(f.as_ptr(), layer as i32, PRIORITY, flags) };
-        if raw as isize == INVALID_HANDLE_VALUE.0 as isize {
+        // WinDivert's INVALID_HANDLE_VALUE is (void*)-1.
+        if raw == usize::MAX as *mut c_void {
             return Err(std::io::Error::last_os_error());
         }
         Ok(Handle {
