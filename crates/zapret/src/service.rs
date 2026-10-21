@@ -78,7 +78,9 @@ pub fn state(name: &str) -> SvcState {
 /// the `zapret2` service exists, else Flowseal's. The app installs one engine at a time; when
 /// `service.bat` puts `zapret` next to `zapret2`, the system checks name the conflict (spec 9).
 pub fn active() -> (&'static str, &'static str) {
-    if state(SERVICE2) == SvcState::NotInstalled {
+    if cfg!(target_os = "linux") {
+        (SERVICE2, "nfqws2")
+    } else if state(SERVICE2) == SvcState::NotInstalled {
         (SERVICE, "winws.exe")
     } else {
         (SERVICE2, WINWS2)
@@ -313,10 +315,12 @@ pub fn stop(name: &str) -> anyhow::Result<()> {
 }
 
 pub fn restart(name: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        state(name) != SvcState::NotInstalled,
-        "service {name} is not installed"
-    );
+    if state(name) == SvcState::NotInstalled {
+        if cfg!(target_os = "linux") || name == SERVICE2 {
+            anyhow::bail!("Служба {name} ещё не установлена: сначала примените стратегию кнопкой «Применить»");
+        }
+        anyhow::bail!("service {name} is not installed");
+    }
     stop(name)?;
     start(name)
 }
@@ -328,6 +332,44 @@ pub fn restart_if_running(name: &str) -> anyhow::Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// Last 100 lines of system logs from journalctl for the active service (`zapret2`, fallback `zapret`).
+pub fn logs() -> String {
+    let read_unit = |unit: &str| -> Option<String> {
+        let res = exec::run(
+            Command::new("journalctl").args(["-u", unit, "-n", "100", "--no-pager"]),
+            Duration::from_secs(10),
+            None,
+        );
+        let out = match res {
+            Ok(out) if out.success() && !out.stdout.contains("Specifying which units") => out,
+            _ => crate::root::run("journalctl", &["-u", unit, "-n", "100", "--no-pager"]).ok()?,
+        };
+        if out.success() {
+            let text = out.stdout.trim().to_string();
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+        None
+    };
+
+    if let Some(logs) = read_unit(SERVICE2) {
+        if !logs.contains("-- No entries --") {
+            return logs;
+        }
+        if let Some(fallback) = read_unit(SERVICE) {
+            if !fallback.contains("-- No entries --") {
+                return fallback;
+            }
+        }
+        return logs;
+    }
+    if let Some(logs) = read_unit(SERVICE) {
+        return logs;
+    }
+    "-- No entries --".to_string()
 }
 
 /// The arguments live in the service: after a game filter change the active strategy is

@@ -155,3 +155,9 @@ fn live_status_of_the_zapret_service() {
         "{candidates:?}"
     );
 }
+
+#[test]
+fn reads_service_logs_without_panicking() {
+    let logs = zapret::service::logs();
+    assert!(!logs.is_empty());
+}

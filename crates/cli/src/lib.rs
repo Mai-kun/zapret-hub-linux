@@ -419,7 +419,7 @@ mod tests {
     }
 
     /// Window commands the CLI leaves out (spec 6).
-    const WINDOW_ONLY: [&str; 16] = [
+    const WINDOW_ONLY: [&str; 20] = [
         "detect_folders",
         "check_folder",
         "check_zapret2_folder",
@@ -439,6 +439,11 @@ mod tests {
         // The editor checks a rule as it is typed and fills its IP list from a pasted text.
         "validate_route",
         "import_route_lines",
+        // Linux system tools and diagnostics tab
+        "stop_service",
+        "nft_rules",
+        "service_logs",
+        "flush_dns",
     ];
 
     /// `("cmd", { a, b })` → the argument names in `bindings.ts`, sorted.

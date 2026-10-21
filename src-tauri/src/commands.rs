@@ -626,6 +626,38 @@ pub async fn remove_service(handle: AppHandle) -> Answer<()> {
 
 #[tauri::command]
 #[specta::specta]
+pub async fn stop_service(handle: AppHandle) -> Answer<()> {
+    blocking(move || {
+        let done = routing::paused(&handle, || {
+            let (name, _) = zapret::service::active();
+            zapret::service::stop(name)
+        });
+        actions::changed(&handle);
+        done
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn nft_rules() -> Answer<String> {
+    blocking(|| Ok(zapret2::nft::rules())).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn service_logs() -> Answer<String> {
+    blocking(|| Ok(zapret::service::logs())).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn flush_dns() -> Answer<()> {
+    blocking(zapret::hosts::flush_dns).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn quick_check(handle: AppHandle) -> Answer<QuickCheck> {
     blocking(move || actions::quick_check(&handle)).await
 }

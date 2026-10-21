@@ -103,6 +103,10 @@ export const commands = {
 	/**  Not a change to zapret: no queue. */
 	clearDiscordCache: () => typedError<CacheReport[], string>(__TAURI_INVOKE("clear_discord_cache")),
 	removeService: () => typedError<null, string>(__TAURI_INVOKE("remove_service")),
+	stopService: () => typedError<null, string>(__TAURI_INVOKE("stop_service")),
+	nftRules: () => typedError<string, string>(__TAURI_INVOKE("nft_rules")),
+	serviceLogs: () => typedError<string, string>(__TAURI_INVOKE("service_logs")),
+	flushDns: () => typedError<null, string>(__TAURI_INVOKE("flush_dns")),
 	quickCheck: () => typedError<QuickCheck, string>(__TAURI_INVOKE("quick_check")),
 	takeNotices: () => __TAURI_INVOKE<Notice[]>("take_notices"),
 	/**  The only command that writes `router_enabled` (`routing::set_enabled`). */

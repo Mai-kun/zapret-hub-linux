@@ -112,6 +112,31 @@ pub fn clear() {
     let _ = zapret::root::run("nft", &["delete", "table", "inet", "zapret_hub"]);
 }
 
+/// Active rules in nftables: checks table `zapret_hub`, fallback `zapretunix`.
+pub fn rules() -> String {
+    let check = |table: &str| -> Option<String> {
+        if let Ok(out) = exec::run(
+            Command::new("nft").args(["list", "table", "inet", table]),
+            Duration::from_secs(10),
+            None,
+        ) {
+            if out.success() && !out.stdout.trim().is_empty() {
+                return Some(out.stdout.trim().to_string());
+            }
+        }
+        if let Ok(out) = zapret::root::run("nft", &["list", "table", "inet", table]) {
+            if out.success() && !out.stdout.trim().is_empty() {
+                return Some(out.stdout.trim().to_string());
+            }
+        }
+        None
+    };
+
+    check("zapret_hub")
+        .or_else(|| check("zapretunix"))
+        .unwrap_or_else(|| "Таблица nftables не активна".to_string())
+}
+
 /// The `ExecStartPre` and `ExecStopPost` lines a `zapret2` service that runs `nfqws2` gets: the
 /// table comes up before the engine, and steps down after it, whatever the exit.
 pub fn unit_hooks() -> Option<String> {
@@ -183,5 +208,11 @@ mod tests {
         }
         let empty = table("", "");
         assert!(empty.contains("policy accept;") && !empty.contains("queue num"));
+    }
+
+    #[test]
+    fn nft_rules_answers_listing_or_inactive_message() {
+        let text = rules();
+        assert!(!text.is_empty());
     }
 }
