@@ -143,7 +143,7 @@ pub fn unit_hooks() -> Option<String> {
     let nft = nft_path().ok()?;
     let shown = nft.display();
     Some(format!(
-        "ExecStartPre={shown} -f {CONFIG}\nExecStopPost={shown} delete table inet zapret_hub\n"
+        "ExecStartPre=+{shown} -f {CONFIG}\nExecStopPost=+{shown} delete table inet zapret_hub\n"
     ))
 }
 

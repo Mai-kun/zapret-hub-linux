@@ -211,8 +211,9 @@ pub fn create(name: &str, bin_path: &str, auto_start: bool) -> anyhow::Result<()
         "# not started at boot"
     };
     let unit = format!(
-        "[Unit]\nDescription={description}\nAfter=network.target\n\n[Service]\n{}ExecStart={bin_path}\n\n[Install]\n{wanted}\n",
+        "[Unit]\nDescription={description}\nAfter=network.target\n\n[Service]\n{}{}ExecStart={bin_path}\n\n[Install]\n{wanted}\n",
         unit_hooks(name),
+        run_as_user(name),
     );
     let path = unit_path(name);
     crate::root::write(&path, &unit)?;
@@ -225,7 +226,8 @@ pub fn create(name: &str, bin_path: &str, auto_start: bool) -> anyhow::Result<()
 
 /// `nfqws2`'s nftables queue comes up with its service and goes down with it (`nft::CONFIG`,
 /// present only once its ports were written). An absent file or `nft` gives no hooks: without
-/// them an engine that does not need them stays as it was.
+/// them an engine that does not need them stays as it was. The `+` is root for the hooks when
+/// `run_as_user` keeps the engine itself unprivileged.
 fn unit_hooks(name: &str) -> String {
     let config = "/etc/zapret-hub/nfqws2.nft";
     if name != SERVICE2 || !std::path::Path::new(config).exists() {
@@ -235,7 +237,34 @@ fn unit_hooks(name: &str) -> String {
     let Some(nft) = which.as_deref().filter(|shown| shown.starts_with('/')) else {
         return String::new();
     };
-    format!("ExecStartPre={nft} -f {config}\nExecStopPost={nft} delete table inet zapret_hub\n")
+    format!(
+        "ExecStartPre=+{nft} -f {config}\nExecStopPost=+{nft} delete table inet zapret_hub\n"
+    )
+}
+
+/// Linux: `nfqws2` started as root drops its rights to UID 0x7FFFFFFF, which cannot even enter
+/// the user's home (`/home/<user>` is 700), so the strategy files fail on the first `--hostlist`.
+/// The checks and tests run `nfqws2` as the user, and there it works and reads everything, so the
+/// service does the same: `User=` of this process and the net capabilities the nfqueue asks for.
+fn run_as_user(name: &str) -> String {
+    if !cfg!(target_os = "linux") || name != SERVICE2 {
+        return String::new();
+    }
+    let Some(uid) = uid_this_process() else {
+        return String::new();
+    };
+    format!("User={uid}\nAmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW\n")
+}
+
+/// The first `Uid:` field of `/proc/self/status` (the real uid): a numeric `User=` is systemd
+/// enough. `None` off Linux.
+fn uid_this_process() -> Option<String> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .map(str::to_owned)
 }
 
 /// The absolute path of `nft`, what systemd's unit lines need.
