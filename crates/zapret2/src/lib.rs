@@ -3,6 +3,7 @@
 //! and the `zapret2` service in `service`.
 
 pub mod circular;
+pub mod nft;
 pub mod service;
 pub mod strategies;
 
@@ -23,8 +24,15 @@ pub fn strip_prefix(name: &str) -> Option<&str> {
         .then(|| &name[PREFIX.len()..])
 }
 
-/// Where `winws2.exe` may be under the root: zapret-win-bundle, a `bin\`, the release zip.
-const EXE_DIRS: [&str; 3] = ["", "bin", "binaries/windows-x86_64"];
+/// Where `winws2.exe`/`nfqws2` may be under the root: zapret-win-bundle, a `bin\`, the release
+/// zip (the Windows and the Linux builds in it).
+const EXE_DIRS: [&str; 5] = [
+    "",
+    "bin",
+    "binaries/windows-x86_64",
+    "binaries/linux-x86_64",
+    "binaries/x86_64",
+];
 /// What `winws2.exe` needs next to it.
 const BESIDE_EXE: [&str; 3] = ["cygwin1.dll", "WinDivert.dll", "WinDivert64.sys"];
 /// What every strategy loads from `lua\`.
@@ -73,18 +81,18 @@ impl Engine {
             "{} is the root of a drive, which winws2 cannot use (its path would end in \\ right before a quote): put zapret2 in a folder",
             root.display()
         );
-        let exe_dir = EXE_DIRS
+        // The Linux build wins when both builds are in the release: this system runs only it.
+        let nfqws_dir = EXE_DIRS
             .iter()
             .map(|sub| root.join(sub))
-            .find(|dir| dir.join("winws2.exe").is_file());
-        // The Linux build of zapret2 is self-contained: `nfqws2` alone is enough.
-        let nfqws_dir = if exe_dir.is_some() {
+            .find(|dir| dir.join("nfqws2").is_file());
+        let exe_dir = if nfqws_dir.is_some() {
             None
         } else {
             EXE_DIRS
                 .iter()
                 .map(|sub| root.join(sub))
-                .find(|dir| dir.join("nfqws2").is_file())
+                .find(|dir| dir.join("winws2.exe").is_file())
         };
         let mut missing = Vec::new();
         match (&exe_dir, &nfqws_dir) {
@@ -96,10 +104,8 @@ impl Engine {
                     }
                 }
             }
-            (None, Some(dir)) => {
-                let _ = dir;
-            }
-            (None, None) => missing.push("winws2.exe".to_owned()),
+            (None, Some(_)) => {}
+            (None, None) => missing.push("winws2.exe / nfqws2".to_owned()),
         }
         for file in LUA_FILES {
             let path = Path::new("lua").join(file);
@@ -126,6 +132,12 @@ impl Engine {
 
     pub fn exe(&self) -> &Path {
         &self.exe
+    }
+
+    /// The engine is the Linux build (`nfqws2`), which takes its packets from an nftables queue
+    /// (`nft`), not from WinDivert (`--wf-*`).
+    pub fn is_nfqws(&self) -> bool {
+        self.exe.file_name().is_some_and(|name| name == "nfqws2")
     }
 
     pub fn lua(&self) -> PathBuf {
@@ -291,12 +303,47 @@ mod tests {
         touch(&release.join("lua/zapret-lib.lua"));
         touch(&bundle.join("zapret-winws/winws2.exe"));
         touch(&bundle.join("zapret-winws/lua/zapret-lib.lua"));
-        assert!(looks_like_zapret2(&release) && looks_like_zapret2(&bundle));
+        assert!(
+            looks_like_zapret2(&release) && looks_like_zapret2(&bundle),
+            "both builds' layouts are a zapret2 folder"
+        );
         assert!(!looks_like_zapret2(&empty));
         assert_eq!(
             find_zapret2(&[empty, bundle.clone(), release]),
             Some(bundle)
         );
+    }
+
+    #[test]
+    fn a_linux_release_is_found_and_nfqws_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let touch = |path: &Path| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        };
+        let dir = tmp.path().join("zapret2-linux");
+        touch(&dir.join("binaries/linux-x86_64/nfqws2"));
+        touch(&dir.join("lua/zapret-lib.lua"));
+        touch(&dir.join("lua/zapret-antidpi.lua"));
+        let engine = Engine::open(&dir).unwrap();
+        assert_eq!(
+            engine.exe(),
+            dir.join("binaries/linux-x86_64/nfqws2"),
+            "the Linux build is the engine"
+        );
+        assert!(engine.is_nfqws());
+        // Both builds present: nfqws2 still wins over `binaries/windows-x86_64`.
+        touch(&dir.join("binaries/windows-x86_64/winws2.exe"));
+        for file in ["cygwin1.dll", "WinDivert.dll", "WinDivert64.sys"] {
+            touch(&dir.join("binaries/windows-x86_64").join(file));
+        }
+        let engine = Engine::open(&dir).unwrap();
+        assert_eq!(
+            engine.exe(),
+            dir.join("binaries/linux-x86_64/nfqws2"),
+            "the Linux build is the engine"
+        );
+        assert!(engine.is_nfqws());
     }
 
     const LIB: &str = r"D:\zapret2\lua\zapret-lib.lua";

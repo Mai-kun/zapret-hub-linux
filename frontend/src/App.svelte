@@ -48,6 +48,9 @@
       <current.view />
     </main>
   </div>
+{:else}
+  <!-- The settings have not arrived (IPC broken or slow): the page answers for itself instead of white -->
+  <p class="loading">{S.common.loading}</p>
 {/if}
 
 <Notices />
@@ -78,6 +81,12 @@
   .tab.active {
     background: var(--hover);
     font-weight: 600;
+  }
+
+  .loading {
+    margin: 40vh auto 0;
+    text-align: center;
+    color: var(--muted, inherit);
   }
 
   .testing {

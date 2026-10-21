@@ -285,11 +285,13 @@ fn run_strategies(
         .collect())
 }
 
-/// Every winws.exe and winws2.exe ended, and gone (their WinDivert handles closed).
+/// Every winws.exe and winws2.exe ended, and gone (their WinDivert handles closed); `nfqws2`
+/// the same, and nftables is done with it: the queue only steals packets.
 fn stop_engines() -> anyhow::Result<()> {
-    for image in ["winws.exe", WINWS2] {
+    for image in ["winws.exe", WINWS2, "nfqws2"] {
         zapret::procs::kill_all(image)?;
     }
+    zapret2::nft::clear();
     Ok(())
 }
 
@@ -326,13 +328,15 @@ fn warm_dns(work: &Work) {
     });
 }
 
-/// How a strategy starts: the program, its working folder, the arguments and their hash.
+/// How a strategy starts: the program, its working folder, the arguments and their hash, and for
+/// `nfqws2` the `(tcp, udp)` ports the nftables queue takes from `--wf-*out=` before it runs.
 struct Launch {
     exe: PathBuf,
     cwd: PathBuf,
     tail: String,
     sha256: String,
     zapret2: bool,
+    nft_ports: Option<(String, String)>,
 }
 
 /// The one place a test run tells the engines apart (zapret2 spec 3.1): by the name's prefix.
@@ -347,12 +351,20 @@ fn launch(folder: Option<&Folder>, engine2: Option<&Engine>, name: &str) -> anyh
             tail: parsed.command_tail(),
             sha256: parsed.sha256(),
             zapret2: false,
+            nft_ports: None,
         });
     };
     let engine = engine2
         .ok_or_else(|| anyhow::anyhow!("the zapret2 folder is not set: choose it in Settings"))?;
     let strategy = zapret2::strategies::find(engine.root(), name)?;
     let tail = zapret2::strategies::tail(engine, folder, &strategy.text)?;
+    // nfqws2 does not know the `--wf-*out=` ports: the nftables queue takes them over.
+    let (tail, nft_ports) = if engine.is_nfqws() {
+        let (tail, tcp, udp) = zapret2::nft::translate(&tail);
+        (tail, Some((tcp, udp)))
+    } else {
+        (tail, None)
+    };
     zapret2::strategies::check(engine, &tail)?;
     Ok(Launch {
         exe: engine.exe().to_path_buf(),
@@ -362,6 +374,7 @@ fn launch(folder: Option<&Folder>, engine2: Option<&Engine>, name: &str) -> anyh
         sha256: zapret::sha256_hex(tail.as_bytes()),
         tail,
         zapret2: true,
+        nft_ports,
     })
 }
 
@@ -389,9 +402,19 @@ fn run_one(
         }
     };
     result.args_sha256 = launch.sha256;
+    // The queue comes up just before the engine: without it, tests measure nothing filtered.
+    if let Some((tcp, udp)) = &launch.nft_ports {
+        if let Err(err) = zapret2::nft::apply(tcp, udp) {
+            result.launch_error = Some(format!("nftables: {err:#}"));
+            return result;
+        }
+    }
     let mut winws = match Winws::start(&launch.exe, &launch.cwd, &launch.tail) {
         Ok(winws) => winws,
         Err(err) => {
+            if launch.nft_ports.is_some() {
+                zapret2::nft::clear();
+            }
             let image = launch
                 .exe
                 .file_name()
@@ -401,6 +424,9 @@ fn run_one(
         }
     };
     if let Err(output) = winws.wait_ready(READY) {
+        if launch.nft_ports.is_some() {
+            zapret2::nft::clear();
+        }
         result.launch_error = Some(output);
         return result;
     }
@@ -426,6 +452,9 @@ fn run_one(
     // Read after `stop`, which waits for the readers: the output is whole.
     let exited = winws.exited();
     let output = winws.stop();
+    if launch.nft_ports.is_some() {
+        zapret2::nft::clear();
+    }
     result.launch_error = if launch.zapret2 {
         lua_failure(exited, &output)
     } else {

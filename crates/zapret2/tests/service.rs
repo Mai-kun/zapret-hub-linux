@@ -11,8 +11,13 @@ use zapret2::strategies;
 fn winws2_gets_the_strategy_first_and_its_own_flags_last() {
     let tail = r#"--chdir="D:\zapret2" --wf-tcp-out=443 --lua-desync=fake:blob=fake_default_tls"#;
     assert_eq!(
-        dry_run_args(tail),
+        dry_run_args(false, tail),
         format!("{tail} --wf-dup-check=0 --dry-run")
+    );
+    assert_eq!(
+        dry_run_args(true, "--wf-tcp-out=443"),
+        format!("--wf-tcp-out=443 --dry-run"),
+        "nfqws2 needs only --dry-run, its filter is the nftables queue"
     );
     assert_eq!(intercept_args(tail), format!("{tail} --intercept=0"));
     let dir = tempfile::tempdir().unwrap();

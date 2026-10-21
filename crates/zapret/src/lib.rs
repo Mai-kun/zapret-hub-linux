@@ -12,6 +12,7 @@ pub mod hosts;
 pub mod ipset;
 pub mod procs;
 pub mod release;
+pub mod root;
 pub mod service;
 pub mod snapshot;
 pub mod strategies;

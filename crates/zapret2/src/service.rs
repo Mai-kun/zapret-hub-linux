@@ -13,9 +13,14 @@ use crate::strategies::{self, Strategy};
 use crate::{Engine, PREFIX};
 
 /// `--dry-run` goes last: before an option it does not know, it ends with code 1 and says
-/// nothing. `--wf-dup-check=0` lets it pass next to a running winws2 with the same filter.
-pub fn dry_run_args(tail: &str) -> String {
-    format!("{tail} --wf-dup-check=0 --dry-run")
+/// nothing. The Windows build gets `--wf-dup-check=0` next to a running winws2 with the same
+/// filter; the Linux build's filter is an nftables table, and `--dry-run` alone suffices.
+pub fn dry_run_args(is_nfqws: bool, tail: &str) -> String {
+    if is_nfqws {
+        format!("{tail} --dry-run")
+    } else {
+        format!("{tail} --wf-dup-check=0 --dry-run")
+    }
 }
 
 /// Lua starts for real behind an empty WinDivert filter: traffic is not touched.
@@ -29,10 +34,14 @@ pub fn bin_path(engine: &Engine, tail: &str) -> String {
 }
 
 /// The whole check (spec 5.3), to the first failure: the static one, `--dry-run`,
-/// `--intercept=0`. Runs winws2, so it needs admin rights. An error carries winws2's whole output.
+/// `--intercept=0`. Runs the engine, so it needs the rights its build asks for. An error carries
+/// the whole output. For `nfqws2` the arguments come out as he reads them: the `--wf-*` options
+/// are WinDivert's, `nft::translate` swaps them for `--qnum`.
 pub fn validate(engine: &Engine, tail: &str) -> anyhow::Result<()> {
     strategies::check(engine, tail)?;
-    let dry = run(engine, &dry_run_args(tail))?;
+    let (tail, _) = real_args(engine, tail);
+    let is_nfqws = engine.is_nfqws();
+    let dry = run(engine, &dry_run_args(is_nfqws, &tail))?;
     let verified = [&dry.stdout, &dry.stderr]
         .iter()
         .any(|text| text.contains("command line parameters verified"));
@@ -41,7 +50,7 @@ pub fn validate(engine: &Engine, tail: &str) -> anyhow::Result<()> {
         "winws2 --dry-run did not accept the strategy:\n{}",
         dry.describe()
     );
-    let init = run(engine, &intercept_args(tail))?;
+    let init = run(engine, &intercept_args(&tail))?;
     anyhow::ensure!(
         init.success(),
         "winws2 --intercept=0 failed{}:\n{}",
@@ -55,6 +64,17 @@ pub fn validate(engine: &Engine, tail: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The tail as the engine's build reads it, and for `nfqws2` the `(tcp, udp)` port lists its
+/// nftables queue takes over from the `--wf-*out=` options (zapret2 spec 5.1).
+fn real_args(engine: &Engine, tail: &str) -> (String, Option<(String, String)>) {
+    if engine.is_nfqws() {
+        let (tail, tcp, udp) = crate::nft::translate(tail);
+        (tail, Some((tcp, udp)))
+    } else {
+        (tail.to_owned(), None)
+    }
+}
+
 fn run(engine: &Engine, args: &str) -> anyhow::Result<exec::Output> {
     let mut cmd = Command::new(engine.exe());
     cmd.args(zapret::custom::spawn_tokens(args))
@@ -64,14 +84,26 @@ fn run(engine: &Engine, args: &str) -> anyhow::Result<exec::Output> {
 }
 
 /// Steps 2–5 of spec 6: Flowseal's service and winws gone, the previous `zapret2` gone, TCP
-/// timestamps on (as Flowseal does), `zapret2` created and started, its strategy recorded.
+/// timestamps on (as Flowseal does), `zapret2` created and started, its strategy recorded. One
+/// engine at a time: a `zapret` service with yet another copy does nothing (zapret2 spec 6). For
+/// `nfqws2` the ports go to the nftables config the unit's `ExecStartPre` applies (spec 6).
 pub fn install(engine: &Engine, strategy: &Strategy, tail: &str) -> anyhow::Result<()> {
     service::stop_and_delete(SERVICE)?;
     zapret::procs::kill_all("winws.exe")?;
+    zapret::procs::kill_all("nfqws2")?;
     service::stop_and_delete(SERVICE2)?;
     zapret::procs::kill_all(service::WINWS2)?;
     let _ = service::enable_tcp_timestamps();
-    service::create(SERVICE2, &bin_path(engine, tail), true)?;
+    let (tail, nft_ports) = real_args(engine, tail);
+    if let Some((tcp, udp)) = &nft_ports {
+        crate::nft::write_config(tcp, udp).with_context(|| {
+            format!(
+                "cannot set up the nftables table file {}, which the zapret2 service applies",
+                crate::nft::CONFIG
+            )
+        })?;
+    }
+    service::create(SERVICE2, &bin_path(engine, &tail), true)?;
     service::start(SERVICE2)?;
     service::set_strategy_of(SERVICE2, &strategy.full_name())
 }

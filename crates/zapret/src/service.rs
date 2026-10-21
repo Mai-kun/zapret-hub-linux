@@ -37,6 +37,12 @@ fn cmd(program: &str, args: &[&str]) -> anyhow::Result<exec::Output> {
     )?)
 }
 
+/// A change of the system's state (`systemctl` unit operations, `sysctl`): root only, so `sudo`
+/// stands in when this process is not root (spec 4).
+fn root_cmd(program: &str, args: &[&str]) -> anyhow::Result<exec::Output> {
+    crate::root::run(program, args)
+}
+
 /// ActiveState and MainPID of unit `name`; `None` when systemd does not know it.
 pub fn status(name: &str) -> Option<(SvcState, u32)> {
     let ask = cmd("systemctl", &["is-active", name]).ok()?;
@@ -189,7 +195,8 @@ fn unit_path(name: &str) -> PathBuf {
 }
 
 /// `<name>.service` with `ExecStart = bin_path`, wanted by multi-user when `auto_start`, as
-/// `service.bat` makes `zapret`; `zapret2` the same way (zapret2 spec 6).
+/// `service.bat` makes `zapret`; `zapret2` the same way (zapret2 spec 6). The file goes and the
+/// systemd state changes with root rights.
 pub fn create(name: &str, bin_path: &str, auto_start: bool) -> anyhow::Result<()> {
     let description = if name == SERVICE {
         "Zapret DPI bypass software"
@@ -202,16 +209,38 @@ pub fn create(name: &str, bin_path: &str, auto_start: bool) -> anyhow::Result<()
         "# not started at boot"
     };
     let unit = format!(
-        "[Unit]\nDescription={description}\nAfter=network.target\n\n[Service]\nExecStart={bin_path}\n\n[Install]\n{wanted}\n",
+        "[Unit]\nDescription={description}\nAfter=network.target\n\n[Service]\n{}ExecStart={bin_path}\n\n[Install]\n{wanted}\n",
+        unit_hooks(name),
     );
     let path = unit_path(name);
-    std::fs::write(&path, unit)
-        .with_context(|| format!("cannot write {}", path.display()))?;
-    cmd("systemctl", &["daemon-reload"])?.check()?;
+    crate::root::write(&path, &unit)?;
+    root_cmd("systemctl", &["daemon-reload"])?.check()?;
     if auto_start {
-        let _ = cmd("systemctl", &["enable", name]);
+        let _ = root_cmd("systemctl", &["enable", name]);
     }
     Ok(())
+}
+
+/// `nfqws2`'s nftables queue comes up with its service and goes down with it (`nft::CONFIG`,
+/// present only once its ports were written). An absent file or `nft` gives no hooks: without
+/// them an engine that does not need them stays as it was.
+fn unit_hooks(name: &str) -> String {
+    let config = "/etc/zapret-hub/nfqws2.nft";
+    if name != SERVICE2 || !std::path::Path::new(config).exists() {
+        return String::new();
+    }
+    let which = which_nft();
+    let Some(nft) = which.as_deref().filter(|shown| shown.starts_with('/')) else {
+        return String::new();
+    };
+    format!("ExecStartPre={nft} -f {config}\nExecStopPost={nft} delete table inet zapret_hub\n")
+}
+
+/// The absolute path of `nft`, what systemd's unit lines need.
+fn which_nft() -> Option<String> {
+    let out = cmd("which", &["nft"]).ok()?;
+    out.success()
+        .then(|| out.stdout.trim().to_owned())
 }
 
 /// `:service_install` after the menu: timestamps on, the old service gone, the new one created
@@ -223,19 +252,19 @@ pub fn install(folder: &Folder, name: &str, parsed: &ParsedArgs) -> anyhow::Resu
     stop_and_delete(SERVICE2)?;
     crate::procs::kill_all(WINWS2)?;
     create(SERVICE, &parsed.bin_path(&folder.winws()), true)?;
-    cmd("systemctl", &["start", SERVICE])?.check()?;
+    root_cmd("systemctl", &["start", SERVICE])?.check()?;
     set_strategy_of(SERVICE, name)
 }
 
 /// `systemctl stop` + the unit file gone with errors ignored, as `service.bat` does where it
 /// does not care.
 pub fn request_delete(name: &str) {
-    let _ = cmd("systemctl", &["stop", name]);
-    let _ = cmd("systemctl", &["disable", name]);
+    let _ = root_cmd("systemctl", &["stop", name]);
+    let _ = root_cmd("systemctl", &["disable", name]);
     let path = unit_path(name);
     if path.exists() {
-        let _ = std::fs::remove_file(&path);
-        let _ = cmd("systemctl", &["daemon-reload"]);
+        crate::root::remove(&path);
+        let _ = root_cmd("systemctl", &["daemon-reload"]);
     }
 }
 
@@ -258,7 +287,7 @@ pub fn stop_and_delete(name: &str) -> anyhow::Result<()> {
 pub fn remove() -> anyhow::Result<()> {
     stop_and_delete(SERVICE)?;
     stop_and_delete(SERVICE2)?;
-    for image in ["winws.exe", WINWS2] {
+    for image in ["winws.exe", WINWS2, "nfqws2"] {
         if let Err(err) = crate::procs::kill_all(image) {
             log::warn!(target: "exec", "{image} was not ended: {err:#}");
         }
@@ -268,7 +297,7 @@ pub fn remove() -> anyhow::Result<()> {
 
 pub fn start(name: &str) -> anyhow::Result<()> {
     if state(name) != SvcState::Running {
-        cmd("systemctl", &["start", name])?.check()?;
+        root_cmd("systemctl", &["start", name])?.check()?;
     }
     Ok(())
 }
@@ -278,7 +307,7 @@ pub fn stop(name: &str) -> anyhow::Result<()> {
         state(name),
         SvcState::Running | SvcState::StartPending | SvcState::Other
     ) {
-        cmd("systemctl", &["stop", name])?.check()?;
+        root_cmd("systemctl", &["stop", name])?.check()?;
     }
     Ok(())
 }
@@ -336,7 +365,7 @@ pub fn parse_timestamps(text: &str) -> Option<bool> {
 }
 
 pub fn enable_tcp_timestamps() -> anyhow::Result<()> {
-    cmd("sysctl", &["-w", "net.ipv4.tcp_timestamps=1"])?.check()?;
+    root_cmd("sysctl", &["-w", "net.ipv4.tcp_timestamps=1"])?.check()?;
     Ok(())
 }
 

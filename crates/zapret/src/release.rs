@@ -327,7 +327,35 @@ fn unpack(
         }
     }
     move_up(&root, dir)?;
+    chmod_nfqws(dir);
     Ok(sha256)
+}
+
+/// The unpack loses the Linux executables' rights: `nfqws2` gets them back, plus the caps its
+/// queue needs, best effort — without them only a root run works, and the launch errors say that.
+fn chmod_nfqws(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(binaries) = std::fs::read_dir(dir.join("binaries")).ok() else {
+        return;
+    };
+    for entry in binaries.flatten() {
+        let nfqws = entry.path().join("nfqws2");
+        if !nfqws.is_file() {
+            continue;
+        }
+        if let Err(err) = std::fs::set_permissions(&nfqws, std::fs::Permissions::from_mode(0o755)) {
+            log::warn!("{} did not become executable: {err}", nfqws.display());
+        }
+        if let Err(err) = crate::root::run(
+            "setcap",
+            &["cap_net_admin,cap_net_raw=+ep", nfqws.display().to_string().as_str()],
+        ) {
+            log::warn!(
+                "{} did not get its network capabilities: {err:#}",
+                nfqws.display()
+            );
+        }
+    }
 }
 
 fn download(
@@ -363,17 +391,12 @@ fn download(
     Ok(())
 }
 
-/// `Expand-Archive` of Windows PowerShell 5.1.
+/// The unpack with `bsdtar` (libarchive is on every system here; `Expand-Archive` is Windows's).
 fn expand(zip: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<()> {
-    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "''"));
-    let script = format!(
-        "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; \
-         Expand-Archive -LiteralPath {} -DestinationPath {}",
-        quote(zip),
-        quote(dest)
-    );
-    let mut cmd = Command::new("powershell.exe");
-    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("cannot create {}", dest.display()))?;
+    let mut cmd = Command::new("bsdtar");
+    cmd.arg("-xf").arg(zip).arg("-C").arg(dest);
     let out = exec::run(&mut cmd, Duration::from_secs(300), Some(cancel))?;
     if out.canceled {
         anyhow::bail!("canceled");
