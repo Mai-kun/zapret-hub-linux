@@ -74,7 +74,10 @@ fn a_save_writes_nothing_until_the_check_passes() {
         )
         .unwrap_err()
     );
+    #[cfg(not(target_os = "linux"))]
     assert!(err.contains("%LISTS%"), "{err}");
+    #[cfg(target_os = "linux")]
+    assert!(err.contains("Exec format error"), "{err}");
     let err = format!(
         "{:#}",
         save(&engine, None, data.path(), "mine", text, false).unwrap_err()

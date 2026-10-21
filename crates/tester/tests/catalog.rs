@@ -247,9 +247,16 @@ fn zapret2_alone_lists_its_strategies_and_names_what_needs_flowseal() {
         .chain(["zapret2:mine".to_owned()])
         .collect();
     assert_eq!(names, expected);
-    // The built-in ones run on Flowseal's lists.
+    // The built-in ones run on Flowseal's lists on Windows, but use defaults on Linux.
+    #[cfg(not(target_os = "linux"))]
     assert!(
         rows[0].error.as_deref().unwrap().contains("%LISTS%"),
+        "{:?}",
+        rows[0]
+    );
+    #[cfg(target_os = "linux")]
+    assert!(
+        !rows[0].error.as_deref().unwrap().contains("%LISTS%"),
         "{:?}",
         rows[0]
     );

@@ -211,6 +211,7 @@ fn the_command_line_fills_every_placeholder() {
 }
 
 #[test]
+#[cfg(not(target_os = "linux"))]
 fn flowseal_placeholders_need_the_flowseal_folder() {
     let dir = tempfile::tempdir().unwrap();
     let engine = engine(dir.path());
@@ -229,6 +230,26 @@ fn flowseal_placeholders_need_the_flowseal_folder() {
     )
     .unwrap();
     assert!(own.starts_with(&format!("--chdir=\"{}\" ", engine.root().display())));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn linux_flowseal_placeholders_use_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let line = tail(
+        &engine,
+        None,
+        "--hostlist=\"%lists%list-general.txt\" --wf-tcp-out=%GameFilterTCP%",
+    )
+    .unwrap();
+    assert!(line.contains(&format!(
+        "--hostlist=\"{}{}",
+        dir.path().join("lists").display(),
+        std::path::MAIN_SEPARATOR
+    )));
+    assert!(line.contains("--wf-tcp-out=12"));
+    assert!(dir.path().join("lists").join("list-general.txt").exists());
 }
 
 /// A lenient first pass, not winws2's own option parsing: step 3 (`--intercept=0`) is the real

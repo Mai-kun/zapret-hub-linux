@@ -73,12 +73,21 @@ fn sudo_refused(out: &exec::Output) -> bool {
 pub fn write(path: &Path, contents: &str) -> anyhow::Result<()> {
     if is_root() {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("cannot create {}", parent.display()))?;
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("cannot create {}", parent.display()))?;
+            }
         }
         std::fs::write(path, contents)
             .with_context(|| format!("cannot write {}", path.display()))?;
         return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let parent_str = parent.display().to_string();
+            let out = run("mkdir", &["-p", &parent_str])?;
+            check_out(out, &format!("cannot create directory {}", parent.display()))?;
+        }
     }
     let temp = std::env::temp_dir().join(format!("zapret-hub-write-{}", std::process::id()));
     std::fs::write(&temp, contents).with_context(|| format!("cannot write {}", temp.display()))?;

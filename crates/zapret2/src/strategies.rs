@@ -118,6 +118,78 @@ const FLOWSEAL_VARS: [&str; 5] = [
     "%GameFilterUDP%",
 ];
 
+const DEFAULT_LISTS: [&str; 8] = [
+    "list-general.txt",
+    "list-google.txt",
+    "list-general-user.txt",
+    "list-exclude.txt",
+    "list-exclude-user.txt",
+    "ipset-all.txt",
+    "ipset-exclude.txt",
+    "ipset-exclude-user.txt",
+];
+
+const DEFAULT_BINS: [&str; 10] = [
+    "ACTIVE_DISCORD_UDP.bin",
+    "ACTIVE_GAME_UDP.bin",
+    "quic_initial_4pda_to.bin",
+    "quic_initial_www_google_com.bin",
+    "stun2.bin",
+    "stun.bin",
+    "tls_clienthello_4pda_to.bin",
+    "tls_clienthello_max_ru.bin",
+    "tls_clienthello_sochi_park.bin",
+    "tls_clienthello_www_google_com.bin",
+];
+
+pub fn lists_dir(engine: &Engine) -> PathBuf {
+    let local = Path::new("data/lists");
+    if local.is_dir() {
+        if let Ok(abs) = local.canonicalize() {
+            return abs;
+        }
+    }
+    engine.root().join("lists")
+}
+
+pub fn bin_dir(engine: &Engine) -> PathBuf {
+    let local = Path::new("data/bin");
+    if local.is_dir() {
+        if let Ok(abs) = local.canonicalize() {
+            return abs;
+        }
+    }
+    engine.root().join("bin")
+}
+
+pub fn ensure_stubs(engine: &Engine) {
+    let lists = lists_dir(engine);
+    if let Ok(()) = std::fs::create_dir_all(&lists) {
+        for file in DEFAULT_LISTS {
+            let path = lists.join(file);
+            if !path.exists() {
+                let _ = std::fs::write(&path, b"");
+            }
+        }
+    }
+
+    let bin = bin_dir(engine);
+    let fake_dir = engine.root().join("files").join("fake");
+    if let Ok(()) = std::fs::create_dir_all(&bin) {
+        for file in DEFAULT_BINS {
+            let path = bin.join(file);
+            if !path.exists() {
+                let fake = fake_dir.join(file);
+                if fake.is_file() {
+                    let _ = std::fs::copy(&fake, &path);
+                } else {
+                    let _ = std::fs::write(&path, b"");
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Strategy {
     /// Without the prefix: `general`.
@@ -363,12 +435,26 @@ pub fn tail(engine: &Engine, folder: Option<&Folder>, text: &str) -> anyhow::Res
             }
         }
         None => {
-            let lower = args.to_ascii_lowercase();
-            if let Some(var) = FLOWSEAL_VARS
-                .iter()
-                .find(|var| lower.contains(&var.to_ascii_lowercase()))
-            {
-                anyhow::bail!("the strategy uses {var}: choose the zapret folder in Settings");
+            if cfg!(target_os = "linux") {
+                ensure_stubs(engine);
+                let filter = zapret::batparse::GameFilterVars::disabled();
+                for (var, value) in [
+                    ("%LISTS%", dir(lists_dir(engine))),
+                    ("%BIN%", dir(bin_dir(engine))),
+                    ("%GameFilterTCP%", filter.tcp),
+                    ("%GameFilterUDP%", filter.udp),
+                    ("%GameFilter%", filter.all),
+                ] {
+                    args = replace_ci(&args, var, &value);
+                }
+            } else {
+                let lower = args.to_ascii_lowercase();
+                if let Some(var) = FLOWSEAL_VARS
+                    .iter()
+                    .find(|var| lower.contains(&var.to_ascii_lowercase()))
+                {
+                    anyhow::bail!("the strategy uses {var}: choose the zapret folder in Settings");
+                }
             }
         }
     }
