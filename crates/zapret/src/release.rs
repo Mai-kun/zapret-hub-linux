@@ -1,7 +1,8 @@
-//! The latest GitHub release of Flowseal or bol-van/zapret2, downloaded with `curl.exe` and unpacked
+//! The latest GitHub release of Flowseal or bol-van/zapret2, downloaded with `curl` and unpacked
 //! into a new folder. Only these two repositories and their asset names: nothing the page or the
 //! pipe sends becomes a URL.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,8 +10,8 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 
-/// Part of every error where an antivirus removed or blocked a file; the page explains it.
-pub const DEFENDER: &str = "blocked or removed by Windows Defender or another antivirus";
+/// Part of every error where the destination was missing or unwritable; the page explains it.
+pub const BLOCKED: &str = "missing or unwritable: check permissions and free space";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 pub enum Engine {
@@ -120,23 +121,26 @@ pub fn select(engine: Engine, json: &str) -> anyhow::Result<Release> {
     })
 }
 
-/// Where a release goes unless the user picks another folder: next to the app's folder, or the
-/// system drive's root when that path has spaces or non-ASCII letters (Flowseal's `service.bat`
-/// breaks on them).
+/// Where a release goes unless the user picks another folder: `$XDG_DATA_HOME`, else
+/// `~/.local/share`. The folder is created here: `target` refuses a parent that does not exist.
 pub fn default_parent() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| Some(exe.parent()?.parent()?.to_path_buf()))
-        .filter(|dir| plain_path(dir))
-        .unwrap_or_else(|| {
-            let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned());
-            PathBuf::from(format!("{drive}\\"))
-        })
+    let dir = data_home(
+        std::env::var_os("XDG_DATA_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    );
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
-fn plain_path(dir: &Path) -> bool {
-    dir.to_str()
-        .is_some_and(|s| s.is_ascii() && !s.contains(' '))
+/// `$XDG_DATA_HOME` when set and non-empty, else `$HOME/.local/share`.
+fn data_home(xdg: Option<&OsStr>, home: Option<&OsStr>) -> PathBuf {
+    xdg.filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|v| !v.is_empty())
+                .map(|home| PathBuf::from(home).join(".local/share"))
+        })
+        .unwrap_or_default()
 }
 
 /// `<parent>\<prefix><tag>`: refused when it exists and is not an empty folder.
@@ -171,8 +175,8 @@ pub fn parse_sums(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The part of a listed path under the release root, for the files that run: the Windows
-/// binaries and the Lua. The release's own top folder, when listed, is skipped.
+/// The part of a listed path under the release root, for the files that run: the binaries
+/// and the Lua. The release's own top folder, when listed, is skipped.
 fn checked_path(path: &str) -> Option<String> {
     let path = path.replace('\\', "/");
     let wanted = |p: &str| p.starts_with("binaries/") || p.starts_with("lua/");
@@ -213,25 +217,18 @@ fn hash_file(file: &Path) -> anyhow::Result<String> {
         .map_err(|err| io_error(file, &err))
 }
 
-/// ERROR_VIRUS_INFECTED, ERROR_VIRUS_DELETED, or a file gone: the antivirus took it.
+/// A file that should be there but is not, or a path that was never writable.
 fn io_error(file: &Path, err: &std::io::Error) -> anyhow::Error {
-    if matches!(err.raw_os_error(), Some(225 | 226)) || err.kind() == std::io::ErrorKind::NotFound {
-        anyhow::anyhow!("{}: {DEFENDER} ({err})", file.display())
+    if err.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!("{}: {BLOCKED} ({err})", file.display())
     } else {
         anyhow::anyhow!("{}: {err}", file.display())
     }
 }
 
-fn mentions_virus(text: &str) -> bool {
-    let text = text.to_lowercase();
-    ["virus", "вирус", "нежелательное"]
-        .iter()
-        .any(|word| text.contains(word))
-}
-
 /// Downloads and unpacks the latest release into a new folder under `parent`. `progress` gets the
-/// bytes so far and the zip's size. On failure or cancel nothing is left but, after an antivirus
-/// block, the empty folder: the user adds it to the exclusions and tries again.
+/// bytes so far and the zip's size. On failure or cancel nothing is left but, after a blocked
+/// write, the empty folder: the user fixes the permissions and tries again.
 pub fn install(
     engine: Engine,
     parent: &Path,
@@ -253,12 +250,12 @@ pub fn install(
         }
         Err(err) => {
             let _ = std::fs::remove_dir_all(&dir);
-            if !format!("{err:#}").contains(DEFENDER) {
+            if !format!("{err:#}").contains(BLOCKED) {
                 return Err(err);
             }
             let _ = std::fs::create_dir_all(&dir);
             return Err(err.context(format!(
-                "add the folder {} to the antivirus exclusions and download again",
+                "cannot write to {}: check permissions and free space, then download again",
                 dir.display()
             )));
         }
@@ -276,7 +273,7 @@ pub fn install(
     })
 }
 
-/// Inside the new folder: the zip and the raw unpack, so one exclusion covers them.
+/// Inside the new folder: the zip and the raw unpack, together and removed when done.
 const STAGING: &str = ".zapret-hub-download";
 
 /// The zip's SHA-256 once the release is in `dir`.
@@ -321,7 +318,7 @@ fn unpack(
             let missing = crate::folder::missing_parts(&root);
             anyhow::ensure!(
                 missing.is_empty(),
-                "the release unpacked without {}: probably {DEFENDER}",
+                "the release unpacked without {}: {BLOCKED}",
                 missing.join(", ")
             );
         }
@@ -379,9 +376,9 @@ fn download(
     if out.canceled {
         anyhow::bail!("canceled");
     }
-    // 23: curl could not write the file, which an antivirus does to a file it does not like.
-    if out.code == Some(23) || mentions_virus(&out.stderr) {
-        anyhow::bail!("{}: {DEFENDER}\n\n{}", dest.display(), out.describe());
+    // 23: curl could not write the file: no space, or no permission to write there.
+    if out.code == Some(23) {
+        anyhow::bail!("{}: {BLOCKED}\n\n{}", dest.display(), out.describe());
     }
     out.check()?;
     let size = std::fs::metadata(dest)
@@ -391,7 +388,7 @@ fn download(
     Ok(())
 }
 
-/// The unpack with `bsdtar` (libarchive is on every system here; `Expand-Archive` is Windows's).
+/// The unpack with `bsdtar` (libarchive is on every system here).
 fn expand(zip: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<()> {
     std::fs::create_dir_all(dest)
         .with_context(|| format!("cannot create {}", dest.display()))?;
@@ -400,9 +397,6 @@ fn expand(zip: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<()> {
     let out = exec::run(&mut cmd, Duration::from_secs(300), Some(cancel))?;
     if out.canceled {
         anyhow::bail!("canceled");
-    }
-    if !out.success() && mentions_virus(&format!("{}{}", out.stdout, out.stderr)) {
-        anyhow::bail!("{}: {DEFENDER}\n\n{}", zip.display(), out.describe());
     }
     out.check()?;
     Ok(())
@@ -543,8 +537,8 @@ mod tests {
         std::fs::remove_file(&exe).unwrap();
         let err = verify(root, &sums).unwrap_err().to_string();
         assert!(
-            err.contains(DEFENDER),
-            "a vanished file is the antivirus: {err}"
+            err.contains(BLOCKED),
+            "a vanished file is a missing or unwritable destination: {err}"
         );
 
         let none = format!(
@@ -555,10 +549,21 @@ mod tests {
     }
 
     #[test]
-    fn only_a_plain_path_is_a_default() {
-        assert!(plain_path(Path::new(r"D:\Tools")));
-        assert!(!plain_path(Path::new(r"C:\Program Files")));
-        assert!(!plain_path(Path::new(r"C:\Users\Иван")));
+    fn data_home_prefers_xdg_then_home() {
+        let home = OsStr::new("/home/me");
+        assert_eq!(
+            data_home(Some(OsStr::new("/data")), Some(home)),
+            PathBuf::from("/data")
+        );
+        assert_eq!(
+            data_home(Some(OsStr::new("")), Some(home)),
+            PathBuf::from("/home/me/.local/share")
+        );
+        assert_eq!(
+            data_home(None, Some(home)),
+            PathBuf::from("/home/me/.local/share")
+        );
+        assert_eq!(data_home(None, None), PathBuf::new());
     }
 
     #[test]
@@ -567,12 +572,12 @@ mod tests {
         let raw = tmp.path().join("x");
         std::fs::create_dir_all(raw.join("zapret2-v0.9.4").join("lua")).unwrap();
         assert_eq!(content_root(&raw).unwrap(), raw.join("zapret2-v0.9.4"));
-        std::fs::write(raw.join("service.bat"), "").unwrap();
+        std::fs::write(raw.join("sha256sum.txt"), "").unwrap();
         assert_eq!(content_root(&raw).unwrap(), raw);
 
         let dir = tmp.path().join("out");
         std::fs::create_dir(&dir).unwrap();
         move_up(&raw, &dir).unwrap();
-        assert!(dir.join("service.bat").is_file() && dir.join("zapret2-v0.9.4").is_dir());
+        assert!(dir.join("sha256sum.txt").is_file() && dir.join("zapret2-v0.9.4").is_dir());
     }
 }

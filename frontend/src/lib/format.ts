@@ -1,4 +1,4 @@
-import type { CheckLevel, CheckStatus, DpiStatus, FolderCheck, Info, MergeNote, Protocol, ProxyState, QuickCheck, Rule, StrategyResult, Suite, Traffic, Via } from "./ipc/bindings";
+import type { CheckLevel, CheckStatus, DpiStatus, Info, MergeNote, Protocol, ProxyState, QuickCheck, Rule, StrategyResult, Suite, Traffic, Via } from "./ipc/bindings";
 import { plural, S } from "./strings";
 
 export function ms(value: number | null | undefined): string {
@@ -19,7 +19,7 @@ export function hubStem(name: string): string {
 /** A zapret2 strategy's name is `zapret2:<name>` (zapret2 spec 3.1). */
 export const ZAPRET2 = "zapret2:";
 
-/** `mine` for `zapret2:mine`; `null` for a Flowseal strategy. */
+/** `mine` for `zapret2:mine`; `null` for a strategy without the prefix. */
 export function zapret2Name(name: string): string | null {
   return name.startsWith(ZAPRET2) ? name.slice(ZAPRET2.length) : null;
 }
@@ -107,13 +107,9 @@ export const ZAPRET2_TEMPLATE = [
   "",
 ].join("\n");
 
-/** The wizard's first step: at least one engine's folder works, and none chosen fails its check. */
-export function foldersReady(flowseal: FolderCheck | null, zapret2: Info | null): boolean {
-  const flowsealOk = flowseal !== null && flowseal.missing.length === 0;
-  const zapret2Ok = zapret2?.dir != null && zapret2.error === null;
-  const flowsealBad = flowseal !== null && !flowsealOk;
-  const zapret2Bad = zapret2?.dir != null && !zapret2Ok;
-  return (flowsealOk || zapret2Ok) && !flowsealBad && !zapret2Bad;
+/** The wizard's first step: a checked zapret2 folder exists and passes its check. */
+export function zapret2Ready(zapret2: Info | null): boolean {
+  return zapret2?.dir != null && zapret2.error === null;
 }
 
 const DEVICE = /^(CON|PRN|AUX|NUL|COM\d|LPT\d)$/i;
@@ -152,8 +148,8 @@ export function ownName(name: string): string {
 export function localizeError(text: string): string {
   if (text.includes("a name is 1-40")) return `${S.names.invalid}\n\n${text}`;
   if (text.includes("is a Windows device name")) return `${S.names.device}\n\n${text}`;
-  // `zapret::release::DEFENDER`.
-  if (text.includes("blocked or removed by Windows Defender")) return `${S.download.defender}\n\n${text}`;
+  // `zapret::release::BLOCKED`.
+  if (text.includes("missing or unwritable: check permissions and free space")) return `${S.download.blocked}\n\n${text}`;
   return text;
 }
 
@@ -196,7 +192,7 @@ export const CIRCULAR_PRESETS = [
 /** What a new circular profile starts with: ALT11's TLS desync, then multidisorder. */
 export const CIRCULAR_START = [`${CIRCULAR_PRESETS[0].line}\n${CIRCULAR_PRESETS[2].line}`, CIRCULAR_PRESETS[3].line];
 
-/** The lists a new profile can be limited to: Flowseal's usual ones and every `--hostlist=`/`--ipset=` the profiles use, as `[token, label]`. */
+/** The lists a new profile can be limited to: the usual ones and every `--hostlist=`/`--ipset=` the profiles use, as `[token, label]`. */
 export function listChoices(filters: string[]): [string, string][] {
   const tokens = [
     '--hostlist="%LISTS%list-general.txt"',

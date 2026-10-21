@@ -74,8 +74,8 @@ fn youtube_is_found_in_a_hosts_file_that_is_not_utf8() {
 
 #[test]
 fn discord_cache_is_cleared_for_installed_builds_only() {
-    let appdata = tempfile::tempdir().unwrap();
-    let discord = appdata.path().join("discord");
+    let config = tempfile::tempdir().unwrap();
+    let discord = config.path().join("discord");
     std::fs::create_dir_all(discord.join("Cache").join("Cache_Data")).unwrap();
     std::fs::write(
         discord.join("Cache").join("Cache_Data").join("f_000001"),
@@ -84,11 +84,11 @@ fn discord_cache_is_cleared_for_installed_builds_only() {
     .unwrap();
     std::fs::create_dir_all(discord.join("GPUCache")).unwrap();
     let mut asked = Vec::new();
-    let reports = clear_in(appdata.path(), |image| {
+    let reports = clear_in(config.path(), |image| {
         asked.push(image.to_owned());
         false
     });
-    assert_eq!(asked, ["Discord.exe"]);
+    assert_eq!(asked, ["Discord"]);
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].install, "Discord");
     let outcomes: Vec<CacheOutcome> = reports[0].dirs.iter().map(|d| d.outcome).collect();

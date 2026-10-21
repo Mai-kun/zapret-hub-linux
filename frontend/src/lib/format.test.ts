@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Rule, StrategyResult } from "./ipc/bindings";
-import { copyStem, blockSummary, bytes, programName, proxyLabel, routeDraft, routeSummary, viaLabel, circularFilter, desyncLabel, estimateMinutes, listChoices, mergeNote, variantLabel, foldersReady, latencySpread, latestPerSuite, localizeError, nameError, ownName, runDate, uniqueName, zapret2Name } from "./format";
+import { copyStem, blockSummary, bytes, programName, proxyLabel, routeDraft, routeSummary, viaLabel, circularFilter, desyncLabel, estimateMinutes, listChoices, mergeNote, variantLabel, zapret2Ready, latencySpread, latestPerSuite, localizeError, nameError, ownName, runDate, uniqueName, zapret2Name } from "./format";
 import { S } from "./strings";
 
 describe("blockSummary", () => {
@@ -28,7 +28,7 @@ describe("zapret2Name", () => {
 describe("copyStem", () => {
   it("drops the parentheses a copy's name cannot have", () => {
     expect(copyStem("zapret2:general (ALT5)")).toBe("ALT5");
-    expect(copyStem("zapret2:general (Flowseal)")).toBe("Flowseal");
+    expect(copyStem("zapret2:general (Mine)")).toBe("Mine");
     expect(copyStem("zapret2:mine")).toBe("mine");
     expect(copyStem("general (ALT11)")).toBe("ALT11");
   });
@@ -54,21 +54,17 @@ describe("latestPerSuite", () => {
   });
 });
 
-describe("foldersReady", () => {
-  const flowseal = (missing: string[]) => ({ path: "E:\Zapret", missing, version: null });
-  const zapret2 = (error: string | null) => ({ dir: "D:\zapret2", version: null, compat: null, error });
+describe("zapret2Ready", () => {
+  const zapret2 = (dir: string | null, error: string | null) => ({ dir, version: null, compat: null, error });
 
-  it("needs at least one working folder", () => {
-    expect(foldersReady(null, null)).toBe(false);
-    expect(foldersReady(flowseal([]), null)).toBe(true);
-    expect(foldersReady(null, zapret2(null))).toBe(true);
-    expect(foldersReady(flowseal([]), zapret2(null))).toBe(true);
+  it("needs a checked folder", () => {
+    expect(zapret2Ready(null)).toBe(false);
+    expect(zapret2Ready(zapret2(null, null))).toBe(false);
+    expect(zapret2Ready(zapret2("~/.local/share/zapret2", null))).toBe(true);
   });
 
-  it("refuses a chosen folder that fails its check, even next to a good one", () => {
-    expect(foldersReady(flowseal(["bin"]), zapret2(null))).toBe(false);
-    expect(foldersReady(flowseal([]), zapret2("missing winws2.exe"))).toBe(false);
-    expect(foldersReady(null, { dir: null, version: null, compat: null, error: null })).toBe(false);
+  it("refuses a folder that fails its check", () => {
+    expect(zapret2Ready(zapret2("/opt/zapret2", "missing nfqws2"))).toBe(false);
   });
 });
 
@@ -118,9 +114,9 @@ describe("localizeError", () => {
     expect(localizeError("something else")).toBe("something else");
   });
 
-  it("explains an antivirus block of a download", () => {
-    const raw = "add the folder D:\\zapret2-v0.9.4 to the antivirus exclusions and download again: x.zip: blocked or removed by Windows Defender or another antivirus";
-    expect(localizeError(raw)).toBe(`${S.download.defender}\n\n${raw}`);
+  it("explains a destination that could not be written", () => {
+    const raw = "cannot write to ~/.local/share/zapret2-v0.9.4: check permissions and free space, then download again: x.zip: missing or unwritable: check permissions and free space";
+    expect(localizeError(raw)).toBe(`${S.download.blocked}\n\n${raw}`);
   });
 });
 
@@ -183,7 +179,7 @@ describe("routes", () => {
   });
   it("names the TCP direct reasons", () => {
     expect(viaLabel({ via: "Direct", reason: { kind: "Marked" } })).toBe("напрямую: прокси недавно не открыл это соединение");
-    expect(viaLabel({ via: "Direct", reason: { kind: "NotAccepted" } })).toBe("напрямую: брандмауэр Windows не пропустил соединение к хабу");
+    expect(viaLabel({ via: "Direct", reason: { kind: "NotAccepted" } })).toBe("напрямую: соединение к хабу не пропущено");
   });
   it("saves what the editor shows, domains included", () => {
     const form = { name: " Discord целиком ", enabled: true, protocol: "both", ports: "", ips: "", domains: " discord.com\n\ndiscord.media \n", apps: "" } as const;
