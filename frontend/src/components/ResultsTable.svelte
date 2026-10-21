@@ -94,7 +94,15 @@
           <td class:num={column !== "name"} title={column === "dbd" ? S.results.dbdHint : undefined}>{@render cell(column, result, rank)}</td>
         {/each}
         {#if onApply}
-          <td><button {disabled} onclick={() => onApply?.(result.name)}>{S.common.apply}</button></td>
+          <td>
+            <button
+              class={rank === 1 ? "primary" : ""}
+              {disabled}
+              onclick={() => onApply?.(result.name)}
+            >
+              {S.common.apply}
+            </button>
+          </td>
         {/if}
       </tr>
       {#if open === result.name}

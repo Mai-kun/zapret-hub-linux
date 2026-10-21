@@ -17,12 +17,13 @@
   // The selection is set once; later reloads keep what the user chose.
   let picked = false;
 
-  const usable = (list: StrategyRow[]) => list.filter((row) => row.error === null && !row.flowseal_copy).map((row) => row.name);
+  const usable = (list: StrategyRow[]) => list.filter((row) => row.error === null).map((row) => row.name);
   // Ticks or clears every strategy in `list`; the ticks outside it stay.
   function setGroup(list: StrategyRow[], on: boolean): void {
     const inGroup = new Set(list.map((row) => row.name));
     chosen = [...chosen.filter((name) => !inGroup.has(name)), ...(on ? usable(list) : [])];
   }
+
   const suiteName = (value: Suite) => (value === "Standard" ? S.tests.standard : S.tests.dpi);
 
   async function openRun(id: string): Promise<void> {
@@ -84,7 +85,7 @@
     </div>
   </section>
   <section class="card">
-    <ResultsTable suite={live.request.suite} results={live.results} />
+    <ResultsTable suite={live.request.suite} results={live.results} onApply={apply} disabled={app.busy || live.restoring} />
   </section>
 {:else}
   <section class="card">
@@ -146,8 +147,8 @@
 {#snippet group(title: string, list: StrategyRow[])}
   <div class="group">
     <h3>{title}</h3>
-    <button onclick={() => setGroup(list, true)}>{S.tests.all}</button>
-    <button onclick={() => setGroup(list, false)}>{S.tests.none}</button>
+    <button type="button" onclick={() => setGroup(list, true)}>{S.tests.all}</button>
+    <button type="button" onclick={() => setGroup(list, false)}>{S.tests.none}</button>
   </div>
   <div class="choices">
     {#each list as row (row.name)}

@@ -9,7 +9,8 @@
   import Tests from "./tabs/Tests.svelte";
   import Zapret from "./tabs/Zapret.svelte";
   import Wizard from "./Wizard.svelte";
-  import { app, refreshOverview, start, type Tab } from "$lib/app.svelte";
+  import { app, change, refreshOverview, start, type Tab } from "$lib/app.svelte";
+  import { commands } from "$lib/ipc/bindings";
   import { S } from "$lib/strings";
 
   const TABS = [
@@ -23,12 +24,29 @@
 
   const current = $derived(TABS.find((tab) => tab.id === app.tab) ?? TABS[0]!);
 
+  const cleanStrategy = (name: string | null) => (name ? name.replace(/^zapret2:/, "") : S.overview.noStrategy);
+
   onMount(() => void start());
 
   // Files dropped into a strategies folder by hand announce nothing: coming back to the window reads everything again.
   function onFocus(): void {
     app.revision++;
     void refreshOverview();
+  }
+
+  async function toggleBypass(): Promise<void> {
+    if (!app.overview) return;
+    if (app.overview.service === "Running") {
+      await change(S.failed.removeService, () => commands.removeService());
+    } else {
+      if (app.overview.strategy) {
+        await change(S.failed.apply, () => commands.applyStrategy(app.overview!.strategy!));
+      } else if (app.overview.last_run?.best) {
+        await change(S.failed.apply, () => commands.applyBest());
+      } else {
+        app.tab = "strategies";
+      }
+    }
   }
 </script>
 
@@ -42,7 +60,24 @@
       {#each TABS as tab (tab.id)}
         <button class="tab" class:active={tab.id === current.id} onclick={() => (app.tab = tab.id)}>{tab.label}</button>
       {/each}
-      {#if app.live}<span class="testing warn">{S.overview.testing}</span>{/if}
+      <div class="nav-controls">
+        {#if app.live}<span class="testing warn">{S.overview.testing}</span>{/if}
+        {#if app.overview}
+          {@const isRunning = app.overview.service === "Running"}
+          {@const locked = app.busy || (app.overview.testing ?? false)}
+          <div class="bypass-widget" title={isRunning ? `${S.header.bypassActive}: ${cleanStrategy(app.overview.strategy)}` : S.header.bypassInactive}>
+            <span class="status-dot {isRunning ? 'online' : 'offline'}"></span>
+            <span class="status-label">{isRunning ? S.header.bypassActive : S.header.bypassInactive}</span>
+            <button
+              class="quick-toggle {isRunning ? 'danger' : 'primary'}"
+              disabled={locked}
+              onclick={toggleBypass}
+            >
+              {isRunning ? S.header.turnOff : S.header.turnOn}
+            </button>
+          </div>
+        {/if}
+      </div>
     </nav>
     <main>
       <current.view />
@@ -72,7 +107,6 @@
     border-bottom: 1px solid var(--border);
   }
 
-
   .tab {
     border: none;
     background: none;
@@ -83,6 +117,52 @@
     font-weight: 600;
   }
 
+  .nav-controls {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .bypass-widget {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    font-size: 12px;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .status-dot.online {
+    background: var(--ok);
+    box-shadow: 0 0 6px var(--ok);
+  }
+
+  .status-dot.offline {
+    background: var(--muted);
+  }
+
+  .status-label {
+    font-weight: 500;
+    color: var(--text);
+  }
+
+  .quick-toggle {
+    padding: 2px 8px;
+    font-size: 11px;
+    border-radius: 12px;
+    line-height: 1.3;
+  }
+
   .loading {
     margin: 40vh auto 0;
     text-align: center;
@@ -90,7 +170,7 @@
   }
 
   .testing {
-    margin-left: auto;
+    font-size: 13px;
   }
 
   main {

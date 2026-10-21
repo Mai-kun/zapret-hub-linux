@@ -4,6 +4,7 @@
   import { app, change, refreshLive } from "$lib/app.svelte";
   import { confirmation } from "$lib/confirm.svelte";
   import { ZAPRET2_TEMPLATE, copyStem, blockSummary, hubStem, mergeNote, ms, nameError, ownName, runDate, uniqueName, variantLabel, zapret2Name } from "$lib/format";
+  import { detectTechniques, summarizeServices, techniqueColor, type Technique } from "$lib/techniques";
   import { S } from "$lib/strings";
   import RepeatsSelect from "../components/RepeatsSelect.svelte";
   import TargetChecks from "../components/TargetChecks.svelte";
@@ -24,6 +25,7 @@
   let merging = $state<{ picked: string[]; name: string; result: Merged | null } | null>(null);
   let cloneName = $state("");
   let repeats = $state(1);
+  let tagsCache = $state<Record<string, Technique[]>>({});
 
   const visible = $derived(rows.filter((row) => row.name.toLowerCase().includes(query.trim().toLowerCase())));
   const locked = $derived(app.busy || (app.overview?.testing ?? false));
@@ -39,10 +41,25 @@
     // Another strategy: its copy gets a fresh name; a reload of the same one keeps what was typed.
     if (detail?.row.name !== name) cloneName = uniqueName(`${copyStem(name)} copy`, taken);
     detail = (await call(S.failed.strategy, commands.getStrategy(name))) ?? null;
+    if (detail && !tagsCache[name]) {
+      const text = (detail.source || "") + " " + detail.blocks.join(" ") + " " + (detail.final_args || "");
+      tagsCache[name] = detectTechniques(text);
+    }
   }
 
   async function load(): Promise<void> {
     rows = (await call(S.failed.strategies, commands.listStrategies())) ?? [];
+    for (const row of rows) {
+      if (!tagsCache[row.name]) {
+        void commands.getStrategy(row.name).then((ans) => {
+          if (ans.status === "ok") {
+            const d = ans.data;
+            const text = (d.source || "") + " " + d.blocks.join(" ") + " " + (d.final_args || "");
+            tagsCache[row.name] = detectTechniques(text);
+          }
+        });
+      }
+    }
     const name = detail?.row.name;
     // A deletion announces itself before it answers: the strategy it removed must not be read again.
     if (name && rows.some((row) => row.name === name)) await open(name);
@@ -157,21 +174,33 @@
       </thead>
       <tbody>
         {#each visible as row (row.name)}
+          {@const tags = tagsCache[row.name]}
           <tr class:selected={detail?.row.name === row.name}>
             <td>
-              <button
-                class="link"
-                onclick={() => {
-                  editing = null;
-                  editing2 = null;
-                  creating = null;
-                  merging = null;
-                  void open(row.name);
-                }}>{row.name}</button
-              >
-              {#if row.active}<span class="badge ok">{S.strategies.active}</span>{/if}
-              {#if row.custom}<span class="badge muted">{S.strategies.custom}</span>{/if}
-              {#if zapret2Name(row.name) !== null}<span class="badge muted">{S.strategies.zapret2}</span>{/if}
+              <div class="strategy-item">
+                <div class="row">
+                  <button
+                    class="link"
+                    onclick={() => {
+                      editing = null;
+                      editing2 = null;
+                      creating = null;
+                      merging = null;
+                      void open(row.name);
+                    }}>{zapret2Name(row.name) ?? row.name}</button
+                  >
+                  {#if row.active}<span class="badge ok">{S.strategies.active}</span>{/if}
+                  {#if row.custom}<span class="badge muted">{S.strategies.custom}</span>{/if}
+                </div>
+                {#if tags && tags.length > 0}
+                  <div class="tech-tags">
+                    {#each tags as tech (tech)}
+                      {@const col = techniqueColor(tech)}
+                      <span class="tech-tag" style:border-color={col.border} style:background={col.bg} style:color={col.text}>{tech}</span>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
             </td>
             <td>{@render summary(row)}</td>
           </tr>
@@ -267,33 +296,64 @@
       {@const d = detail}
       {@const z2 = zapret2Name(d.row.name)}
       <h2>
-        {d.row.name}
+        {z2 ?? d.row.name}
         {#if d.row.active}<span class="badge ok">{S.strategies.active}</span>{/if}
         {#if d.row.custom}<span class="badge muted">{S.strategies.custom}</span>{/if}
-        {#if z2 !== null}<span class="badge muted">{S.strategies.zapret2}</span>{/if}
         {#if d.row.last?.stale}<span class="badge warn">{S.strategies.stale}</span>{/if}
       </h2>
+      {#if tagsCache[d.row.name] || detectTechniques((d.source || '') + ' ' + d.blocks.join(' '))}
+        {@const techs = tagsCache[d.row.name] ?? detectTechniques((d.source || '') + ' ' + d.blocks.join(' '))}
+        {#if techs.length > 0}
+          <div class="tech-tags detail-tags">
+            {#each techs as tech (tech)}
+              {@const col = techniqueColor(tech)}
+              <span class="tech-tag" style:border-color={col.border} style:background={col.bg} style:color={col.text}>{tech}</span>
+            {/each}
+          </div>
+        {/if}
+      {/if}
       {#if d.row.error}<pre class="bad">{d.row.error}</pre>{/if}
+
+      {#if d.blocks.length > 0}
+        {@const serviceSummaries = summarizeServices(d.blocks)}
+        {#if serviceSummaries.length > 0}
+          <section class="part">
+            <h3>{S.strategies.summaryTitle}</h3>
+            <div class="summary-cards">
+              {#each serviceSummaries as item (item.title)}
+                <div class="summary-card">
+                  <div class="summary-header">
+                    <span class="summary-icon">{item.icon}</span>
+                    <strong class="summary-name">{item.title}</strong>
+                  </div>
+                  <div class="summary-details">{item.details}</div>
+                </div>
+              {/each}
+            </div>
+          </section>
+        {/if}
+      {/if}
+
       {#if d.wf || d.blocks.length > 0}
         <section class="part">
-          <h3>{S.strategies.filtersTitle}</h3>
-          {#if d.wf}
-            <h4>{z2 === null ? S.strategies.filter : S.zapret2.global}</h4>
-            <pre>{d.wf}</pre>
-          {/if}
-          {#each d.blocks as block, i (i)}
-            <h4>
-              {z2 === null ? S.strategies.block(i + 1) : S.zapret2.profile(i + 1)}
-              <span class="muted">· {blockSummary(block)}</span>
-            </h4>
-            <pre>{block}</pre>
-          {/each}
-          {#if d.final_args}
-            <details>
-              <summary>{z2 === null ? S.strategies.finalArgs : S.zapret2.commandLine}</summary>
+          <details class="raw-cli-details">
+            <summary>{S.strategies.showCliArgs}</summary>
+            {#if d.wf}
+              <h4>{z2 === null ? S.strategies.filter : S.zapret2.global}</h4>
+              <pre>{d.wf}</pre>
+            {/if}
+            {#each d.blocks as block, i (i)}
+              <h4>
+                {z2 === null ? S.strategies.block(i + 1) : S.zapret2.profile(i + 1)}
+                <span class="muted">· {blockSummary(block)}</span>
+              </h4>
+              <pre>{block}</pre>
+            {/each}
+            {#if d.final_args}
+              <h4>{z2 === null ? S.strategies.finalArgs : S.zapret2.commandLine}</h4>
               <pre>{d.final_args}</pre>
-            </details>
-          {/if}
+            {/if}
+          </details>
         </section>
       {/if}
       {#if d.circular.profiles.some((profile) => profile.circular) || d.circular.warnings.length > 0}
@@ -468,5 +528,80 @@
   /* The list gives way before it scrolls sideways: at the minimum window the result column would be cut off. */
   td {
     white-space: normal;
+  }
+
+  .strategy-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .tech-tags {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 2px;
+  }
+
+  .tech-tags.detail-tags {
+    margin: 6px 0 10px;
+  }
+
+  .tech-tag {
+    display: inline-block;
+    padding: 1px 6px;
+    font-size: 11px;
+    font-weight: 500;
+    border-radius: 4px;
+    border: 1px solid;
+    line-height: 1.3;
+  }
+
+  .summary-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .summary-card {
+    padding: 8px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+
+  .summary-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .summary-icon {
+    font-size: 15px;
+  }
+
+  .summary-name {
+    font-size: 13px;
+  }
+
+  .summary-details {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .raw-cli-details {
+    margin-top: 4px;
+  }
+
+  .raw-cli-details summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--accent);
+  }
+
+  .raw-cli-details summary:hover {
+    text-decoration: underline;
   }
 </style>
