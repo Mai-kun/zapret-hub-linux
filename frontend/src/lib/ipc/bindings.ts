@@ -73,9 +73,15 @@ export const commands = {
 	clearDiscordCache: () => typedError<CacheReport[], string>(__TAURI_INVOKE("clear_discord_cache")),
 	removeService: () => typedError<null, string>(__TAURI_INVOKE("remove_service")),
 	stopService: () => typedError<null, string>(__TAURI_INVOKE("stop_service")),
+	startService: () => typedError<null, string>(__TAURI_INVOKE("start_service")),
+	restartService: () => typedError<null, string>(__TAURI_INVOKE("restart_service")),
 	nftRules: () => typedError<string, string>(__TAURI_INVOKE("nft_rules")),
 	serviceLogs: () => typedError<string, string>(__TAURI_INVOKE("service_logs")),
 	flushDns: () => typedError<null, string>(__TAURI_INVOKE("flush_dns")),
+	/**  The exclusions card's contents: the exclude lists of zapret2 and the settings' ports. */
+	getExclusions: () => typedError<Exclusions, string>(__TAURI_INVOKE("get_exclusions")),
+	/**  The lists, the settings' ports, then the queue rewritten and the service restarted into it. */
+	saveExclusions: (exclusions: Exclusions) => typedError<null, string>(__TAURI_INVOKE("save_exclusions", { exclusions })),
 	quickCheck: () => typedError<QuickCheck, string>(__TAURI_INVOKE("quick_check")),
 	takeNotices: () => __TAURI_INVOKE<Notice[]>("take_notices"),
 	/**  The only command that writes `router_enabled` (`routing::set_enabled`). */
@@ -235,6 +241,16 @@ export type DpiTargetResult = {
 
 export type Engine = "Zapret2";
 
+/**
+ *  What the «Исключения из zapret» card edits: the two exclude lists of zapret2 (one entry per
+ *  line) and the ports that leave the nfqueue.
+ */
+export type Exclusions = {
+	domains: string[],
+	ips: string[],
+	ports: string[],
+};
+
 export type FieldError = {
 	field: string,
 	message: string,
@@ -372,7 +388,7 @@ export type Pass = {
 	score: Score,
 };
 
-export type Preset = "discord-voice" | "discord" | "dbd";
+export type Preset = "discord-voice" | "discord" | "cloudflare" | "telegram" | "twitch" | "dbd";
 
 /**  A profile as the card and the builder show it. */
 export type Profile = {
@@ -508,6 +524,16 @@ export type Settings = {
 	cli_enabled?: boolean,
 	/**  Routing through the SOCKS5 proxy (router spec 3); only `set_router_enabled` writes it. */
 	router_enabled?: boolean,
+	/**
+	 *  The game filter's port placeholder `%GameFilter*`: the whole unprivileged range when on
+	 *  (DbD's matchmaking, AWS GameLift), `12` when off.
+	 */
+	game_filter?: boolean,
+	/**
+	 *  The exclusions card's ports (`51413`, `6881-6889`): traffic on them leaves the nfqueue;
+	 *  the nftables queue is baked with them at every apply (zapret2 spec 5.1).
+	 */
+	excluded_ports?: string[],
 };
 
 /**  zapret, the settings or the history changed: the page reads what it shows again. */
