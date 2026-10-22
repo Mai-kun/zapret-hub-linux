@@ -26,7 +26,7 @@ pub const RECOVERED: &str = "Прерванная операция отмене�
 
 pub fn recovered(operation: &str) -> String {
     format!(
-        "Прошлый запуск не довёл до конца операцию «{operation}». Служба, ipset, игровой фильтр и запущенные вручную winws возвращены как были."
+        "Прошлый запуск не довёл до конца операцию «{operation}». Служба и запущенные вручную winws возвращены как были."
     )
 }
 
@@ -47,16 +47,12 @@ pub fn operation(id: &str) -> &str {
     match id {
         "apply" => "смена стратегии",
         "custom" => "сохранение своей стратегии",
-        "game_filter" => "смена игрового фильтра",
-        "ipset" => "смена режима ipset",
         "remove_service" => "удаление службы",
         "tests" => "тесты стратегий",
         other => other,
     }
 }
 
-pub const PREPARE_FAILED: &str = "Папка zapret не подготовлена";
-pub const FILES_RESTORED: &str = "Файлы своих стратегий выложены заново";
 pub const AUTOSTART_FAILED: &str = "Автозапуск не обновлён";
 pub const HISTORY_FAILED: &str = "История тестов не прочитана";
 pub const RESTORE_AFTER_TESTS: &str = "После тестов не всё вернулось на место";
@@ -116,12 +112,6 @@ pub fn quick_result(check: &QuickCheck) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-pub const UPDATE: &str = "Вышла новая версия Flowseal";
-
-pub fn update(version: &str) -> String {
-    format!("Версия {version}. Ссылка на релиз — на вкладке «Обзор».")
 }
 
 pub const OPEN: &str = "Открыть";
@@ -187,7 +177,6 @@ mod tests {
         TestRun {
             id: "2026-10-10_05-03-34".into(),
             suite: Suite::Standard,
-            flowseal_version: None,
             zapret2_version: None,
             canceled: false,
             restore_error: None,

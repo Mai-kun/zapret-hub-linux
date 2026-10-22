@@ -13,22 +13,12 @@ use tester::catalog::{StrategyDetail, StrategyRow};
 use tester::history::RunSummary;
 use tester::model::TestRun;
 use tester::run::Request;
-use zapret::checks::{CheckAction, SystemCheck};
-use zapret::custom::CustomStrategy;
 use zapret::discord_cache::CacheReport;
-use zapret::fakes::FakeKind;
-use zapret::game_filter::GameFilter;
-use zapret::hosts::HostsPlan;
-use zapret::ipset::IpsetMode;
 use zapret::release::{Downloaded, Engine};
-use zapret::service::{QuickCheck, active};
-use zapret::user_lists::UserList;
+use zapret::service::QuickCheck;
 
 use crate::actions::{self, state as app};
-use crate::dto::{
-    Candidates, Detected, DownloadProgress, FlowsealState, FolderCheck, FolderKind, LiveRun,
-    Notice, Overview,
-};
+use crate::dto::{Candidates, Detected, DownloadProgress, FolderKind, LiveRun, Notice, Overview};
 use crate::settings::Settings;
 use crate::state::AppState;
 use crate::{routing, texts, window};
@@ -73,7 +63,7 @@ pub async fn save_settings(handle: AppHandle, settings: Settings) -> Answer<()> 
 }
 
 /// `save_settings` for zapret-hub-cli (`cli.rs`), not a window command: it never turns the CLI on
-/// and never moves the zapret or zapret2 folder (`settings::to_save`).
+/// and never moves the zapret2 folder (`settings::to_save`).
 pub async fn save_settings_from_pipe(handle: AppHandle, settings: Settings) -> Answer<()> {
     blocking(move || actions::save_settings(&handle, settings, true)).await
 }
@@ -100,12 +90,6 @@ pub async fn wizard_candidates() -> Answer<Candidates> {
 #[specta::specta]
 pub async fn detect_folders() -> Answer<Detected> {
     blocking(|| Ok(actions::detect_folders())).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn check_folder(path: String) -> Answer<FolderCheck> {
-    blocking(move || Ok(actions::check_folder(Path::new(&path)))).await
 }
 
 #[tauri::command]
@@ -144,9 +128,7 @@ pub async fn list_strategies(handle: AppHandle) -> Answer<Vec<StrategyRow>> {
         let state = app(&handle);
         let active = zapret::service::strategy();
         tester::catalog::rows(
-            state.folder_if_set()?.as_ref(),
             state.engine2().ok().flatten().as_ref(),
-            &state.store(),
             &state.paths.data(),
             active.as_deref(),
         )
@@ -160,16 +142,9 @@ pub async fn get_strategy(handle: AppHandle, name: String) -> Answer<StrategyDet
     blocking(move || {
         let state = app(&handle);
         let active = zapret::service::strategy();
-        // A zapret2 name shows why its folder cannot open, not a generic message.
-        let engine2 = if zapret2::strip_prefix(&name).is_some() {
-            Some(state.engine2_required()?)
-        } else {
-            state.engine2().ok().flatten()
-        };
+        // A broken folder shows here as where the version is: the preview says what is missing.
         tester::catalog::detail(
-            state.folder_if_set()?.as_ref(),
-            engine2.as_ref(),
-            &state.store(),
+            state.engine2().ok().flatten().as_ref(),
             &state.paths.data(),
             active.as_deref(),
             &name,
@@ -198,60 +173,6 @@ pub async fn restart_zapret(handle: AppHandle) -> Answer<QuickCheck> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn clone_strategy(
-    handle: AppHandle,
-    source: String,
-    name: String,
-) -> Answer<CustomStrategy> {
-    blocking(move || {
-        let state = app(&handle);
-        let cloned = state
-            .change(|folder| zapret::custom::clone_from(folder, &state.store(), &source, &name));
-        actions::changed(&handle);
-        cloned
-    })
-    .await
-}
-
-/// The editor's «Проверить»: the parser and `winws --dry-run`, nothing saved.
-#[tauri::command]
-#[specta::specta]
-pub async fn validate_custom(handle: AppHandle, strategy: CustomStrategy) -> Answer<()> {
-    blocking(move || {
-        app(&handle).change(|folder| zapret::custom::validate(folder, &strategy).map(|_| ()))
-    })
-    .await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn save_custom(
-    handle: AppHandle,
-    strategy: CustomStrategy,
-    create: bool,
-) -> Answer<Option<QuickCheck>> {
-    blocking(move || actions::save_custom(&handle, strategy, create)).await
-}
-
-/// `name` is the record's name, not the file's.
-#[tauri::command]
-#[specta::specta]
-pub async fn delete_custom(handle: AppHandle, name: String) -> Answer<()> {
-    blocking(move || {
-        let state = app(&handle);
-        let active = zapret::service::strategy();
-        let deleted = state.change(|folder| {
-            zapret::custom::delete(folder, &state.store(), &name, active.as_deref())
-        });
-        actions::changed(&handle);
-        deleted
-    })
-    .await
-}
-
-/// The zapret2 folder, its version and Lua compatibility, or why it cannot be used.
-#[tauri::command]
-#[specta::specta]
 pub async fn zapret2_info(handle: AppHandle) -> Answer<zapret2::Info> {
     blocking(move || {
         Ok(zapret2::info(
@@ -276,8 +197,8 @@ pub async fn validate_zapret2(handle: AppHandle, text: String) -> Answer<()> {
     blocking(move || {
         let state = app(&handle);
         let engine = state.engine2_required()?;
-        state.change_any(|folder| {
-            let tail = zapret2::strategies::tail(&engine, folder, &text)?;
+        state.change(|| {
+            let tail = zapret2::strategies::tail(&engine, &text)?;
             zapret2::service::validate(&engine, &tail)
         })
     })
@@ -304,9 +225,7 @@ pub async fn delete_zapret2(handle: AppHandle, name: String) -> Answer<()> {
         let state = app(&handle);
         let active = zapret::service::strategy();
         let deleted = state.engine2_required().and_then(|engine| {
-            state.change_any(|_| {
-                zapret2::strategies::delete(engine.root(), &name, active.as_deref())
-            })
+            state.change(|| zapret2::strategies::delete(engine.root(), &name, active.as_deref()))
         });
         actions::changed(&handle);
         deleted
@@ -446,166 +365,6 @@ pub async fn run_report(handle: AppHandle, id: String) -> Answer<String> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_flowseal(handle: AppHandle) -> Answer<FlowsealState> {
-    blocking(move || actions::flowseal(&handle)).await
-}
-
-/// The ports are baked into the active service's arguments: it is installed again (spec 5.5).
-#[tauri::command]
-#[specta::specta]
-pub async fn set_game_filter(handle: AppHandle, filter: GameFilter) -> Answer<()> {
-    blocking(move || {
-        let state = app(&handle);
-        let engine2 = state.engine2().ok().flatten();
-        let done = state.change_safely("game_filter", |folder| {
-            zapret::game_filter::write(folder, &filter)?;
-            zapret::service::reinstall_active(folder)?;
-            zapret2::service::reinstall_active(
-                engine2.as_ref(),
-                folder,
-                engine2
-                    .as_ref()
-                    .map_or(Path::new(""), |engine| engine.root()),
-            )
-        });
-        actions::changed(&handle);
-        done
-    })
-    .await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn set_ipset_mode(handle: AppHandle, mode: IpsetMode) -> Answer<()> {
-    blocking(move || {
-        let done = app(&handle).change_safely("ipset", |folder| {
-            zapret::ipset::set_mode(folder, mode)?;
-            zapret::service::restart_if_running(active().0)
-        });
-        actions::changed(&handle);
-        done
-    })
-    .await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn set_check_updates(handle: AppHandle, enabled: bool) -> Answer<()> {
-    blocking(move || {
-        let done =
-            app(&handle).change(|folder| Ok(zapret::flags::set_check_updates(folder, enabled)?));
-        actions::changed(&handle);
-        done
-    })
-    .await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn replace_fake(handle: AppHandle, kind: FakeKind, source: String) -> Answer<()> {
-    blocking(move || {
-        let done = app(&handle).change(|folder| {
-            zapret::fakes::replace(folder, kind, &source)?;
-            zapret::service::restart_if_running(active().0)
-        });
-        actions::changed(&handle);
-        done
-    })
-    .await
-}
-
-/// winws reads the lists again by itself: no restart.
-#[tauri::command]
-#[specta::specta]
-pub async fn add_list_entry(handle: AppHandle, list: UserList, entry: String) -> Answer<()> {
-    blocking(move || {
-        let done = app(&handle).change(|folder| zapret::user_lists::add(folder, list, &entry));
-        actions::changed(&handle);
-        done
-    })
-    .await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn remove_list_entry(handle: AppHandle, list: UserList, entry: String) -> Answer<()> {
-    blocking(move || {
-        let done = app(&handle).change(|folder| zapret::user_lists::remove(folder, list, &entry));
-        actions::changed(&handle);
-        done
-    })
-    .await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn update_ipset(handle: AppHandle) -> Answer<()> {
-    blocking(move || {
-        let state = app(&handle);
-        let socks5 = state.socks5();
-        let done = state.change(|folder| zapret::updates::update_ipset(folder, socks5.as_deref()));
-        actions::changed(&handle);
-        done
-    })
-    .await
-}
-
-/// What applying would change in hosts; nothing is written.
-#[tauri::command]
-#[specta::specta]
-pub async fn hosts_plan(handle: AppHandle) -> Answer<HostsPlan> {
-    blocking(move || zapret::updates::hosts_plan(app(&handle).socks5().as_deref())).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn apply_hosts(handle: AppHandle) -> Answer<()> {
-    blocking(move || {
-        let state = app(&handle);
-        let socks5 = state.socks5();
-        state.change(|_| zapret::updates::apply_hosts(socks5.as_deref()))
-    })
-    .await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn check_flowseal_update(handle: AppHandle) -> Answer<Option<String>> {
-    blocking(move || actions::check_flowseal_update(&handle)).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn system_checks(handle: AppHandle) -> Answer<Vec<SystemCheck>> {
-    blocking(move || {
-        let state = app(&handle);
-        let mut checks = zapret::checks::run_all(&state.folder()?);
-        routing::hide_own_driver(&mut checks, &state.router.status().state);
-        Ok(checks)
-    })
-    .await
-}
-
-/// Removing WinDivert under the router's own handles: on a pause (router spec 11).
-#[tauri::command]
-#[specta::specta]
-pub async fn fix_check(handle: AppHandle, action: CheckAction) -> Answer<()> {
-    blocking(move || {
-        let fix = || app(&handle).change(|_| zapret::checks::fix(action));
-        let done = if action == CheckAction::RemoveWinDivert {
-            routing::paused(&handle, fix)
-        } else {
-            fix()
-        };
-        actions::changed(&handle);
-        done
-    })
-    .await
-}
-
-/// Not a change to zapret: no queue.
-#[tauri::command]
-#[specta::specta]
 pub async fn clear_discord_cache() -> Answer<Vec<CacheReport>> {
     blocking(zapret::discord_cache::clear).await
 }
@@ -616,7 +375,7 @@ pub async fn remove_service(handle: AppHandle) -> Answer<()> {
     blocking(move || {
         // It removes WinDivert too: the router's handles close first (router spec 11).
         let done = routing::paused(&handle, || {
-            app(&handle).change_any_safely("remove_service", |_| zapret::service::remove())
+            app(&handle).change_safely("remove_service", zapret::service::remove)
         });
         actions::changed(&handle);
         done

@@ -11,10 +11,7 @@ pub fn show(app: &AppHandle, title: &str, body: &str) {
     let body = body.to_owned();
     let sent = app.run_on_main_thread(move || {
         let mut cmd = std::process::Command::new("notify-send");
-        cmd.arg("-a")
-            .arg(crate::texts::APP)
-            .arg(title)
-            .arg(body);
+        cmd.arg("-a").arg(crate::texts::APP).arg(title).arg(body);
         let _ = cmd.spawn();
     });
     if let Err(err) = sent {
