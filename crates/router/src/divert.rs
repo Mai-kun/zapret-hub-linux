@@ -238,17 +238,14 @@ pub fn capture_filter(table: &Table, acceptor: Option<u16>, held: &[Ipv4Addr]) -
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
-    Flowseal,
     Zapret2,
 }
 
 pub fn pick_dll(
     running: Option<Engine>,
-    flowseal_root: Option<&Path>,
     winws2_dir: Option<&Path>,
     exists: impl Fn(&Path) -> bool,
 ) -> Result<PathBuf> {
-    let flowseal = flowseal_root.map(|r| r.join("bin").join("WinDivert.dll"));
     let zapret2 = winws2_dir.map(|d| d.join("WinDivert.dll"));
     let running_dll = |dll: Option<PathBuf>| match dll {
         Some(p) if exists(&p) => Ok(p),
@@ -259,22 +256,18 @@ pub fn pick_dll(
         None => bail!("the running engine's folder is unknown: its WinDivert.dll cannot be found"),
     };
     match running {
-        Some(Engine::Flowseal) => running_dll(flowseal),
         Some(Engine::Zapret2) => running_dll(zapret2),
-        None => {
-            let candidates: Vec<PathBuf> = flowseal.into_iter().chain(zapret2).collect();
-            match candidates.iter().find(|p| exists(p)) {
-                Some(p) => Ok(p.clone()),
-                None => bail!(
-                    "WinDivert.dll was not found in the zapret or the zapret2 folder (checked: {})",
-                    candidates
-                        .iter()
-                        .map(|p| p.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            }
-        }
+        None => match zapret2.iter().find(|p| exists(p)) {
+            Some(p) => Ok(p.clone()),
+            None => bail!(
+                "WinDivert.dll was not found in the zapret2 folder (checked: {})",
+                zapret2
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        },
     }
 }
 
@@ -377,8 +370,8 @@ impl Dll {
                     ))
                 } else {
                     // SAFETY: dlerror needs no argument; the string it points to is static.
-                    let reason = unsafe { std::ffi::CStr::from_ptr(libc::dlerror()) }
-                        .to_string_lossy();
+                    let reason =
+                        unsafe { std::ffi::CStr::from_ptr(libc::dlerror()) }.to_string_lossy();
                     Err(anyhow::anyhow!("cannot load {}: {reason}", path.display()))
                 }
             }

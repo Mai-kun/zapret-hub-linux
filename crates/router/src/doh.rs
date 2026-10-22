@@ -10,13 +10,12 @@ pub fn system_doh() -> bool {
     }
     files.push("/etc/systemd/resolved.conf".into());
     files.iter().any(|file| {
-        std::fs::read_to_string(file)
-            .is_ok_and(|text| {
-                text.lines().any(|line| {
-                    let line = line.split('#').next().unwrap_or("").trim();
-                    line.eq_ignore_ascii_case("DNSOverTLS=yes")
-                })
+        std::fs::read_to_string(file).is_ok_and(|text| {
+            text.lines().any(|line| {
+                let line = line.split('#').next().unwrap_or("").trim();
+                line.eq_ignore_ascii_case("DNSOverTLS=yes")
             })
+        })
     })
 }
 

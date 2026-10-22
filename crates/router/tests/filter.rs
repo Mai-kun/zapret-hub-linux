@@ -287,41 +287,20 @@ fn many_ports_still_fit_the_budget() {
 
 #[test]
 fn the_dll_comes_from_the_running_engine() {
-    let flowseal = Path::new(r"E:\Zapret");
     let winws2 = Path::new(r"D:\zapret2\binaries\windows-x86_64");
-    let fs_dll = flowseal.join("bin").join("WinDivert.dll");
     let z2_dll = winws2.join("WinDivert.dll");
     let all = |_: &Path| true;
     assert_eq!(
-        pick_dll(Some(Engine::Zapret2), Some(flowseal), Some(winws2), all).unwrap(),
+        pick_dll(Some(Engine::Zapret2), Some(winws2), all).unwrap(),
         z2_dll
     );
-    assert_eq!(
-        pick_dll(Some(Engine::Flowseal), Some(flowseal), Some(winws2), all).unwrap(),
-        fs_dll
-    );
-    assert_eq!(
-        pick_dll(None, Some(flowseal), Some(winws2), all).unwrap(),
-        fs_dll,
-        "Flowseal first"
-    );
-    let only_z2 = |path: &Path| path == z2_dll;
-    assert_eq!(
-        pick_dll(None, Some(flowseal), Some(winws2), only_z2).unwrap(),
-        z2_dll
-    );
-    let err = pick_dll(
-        Some(Engine::Flowseal),
-        Some(flowseal),
-        Some(winws2),
-        only_z2,
-    )
-    .unwrap_err();
+    assert_eq!(pick_dll(None, Some(winws2), all).unwrap(), z2_dll);
+    let err = pick_dll(Some(Engine::Zapret2), None, all).unwrap_err();
     assert!(
-        format!("{err:#}").contains(fs_dll.to_string_lossy().as_ref()),
+        format!("{err:#}").contains("unknown"),
         "no fallback for a running engine: {err:#}"
     );
-    assert!(pick_dll(None, None, None, all).is_err());
+    assert!(pick_dll(None, None, all).is_err());
 }
 
 #[test]

@@ -172,9 +172,7 @@ pub fn covers(domain: &str, name: &str) -> bool {
 /// A file name or an absolute path, either ending in .exe. Like `is_absolute`, but the Windows
 /// forms (`C:\`, `\\server`) count too: a rules file is written the same way on any OS.
 fn absolute_path(a: &str) -> bool {
-    Path::new(a).is_absolute()
-        || a.starts_with(r"\\")
-        || (a.len() > 2 && a.as_bytes()[1] == b':')
+    Path::new(a).is_absolute() || a.starts_with(r"\\") || (a.len() > 2 && a.as_bytes()[1] == b':')
 }
 
 /// A file name or an absolute path, either ending in .exe.
