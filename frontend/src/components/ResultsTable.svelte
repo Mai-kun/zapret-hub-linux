@@ -11,11 +11,13 @@
     results: StrategyResult[];
     onApply?: (name: string) => void;
     disabled?: boolean;
+    /** The active strategy (from the overview): its row shows «Применено ✓» instead of «Применить». */
+    activeStrategy?: string | null;
     /** The «Доп. игры (DbD, Epic)» checkbox: shows the games' column and their rows in TargetChecks. */
     showGames?: boolean;
   }
 
-  let { suite, results, onApply, disabled = false, showGames = false }: Props = $props();
+  let { suite, results, onApply, disabled = false, activeStrategy = null, showGames = false }: Props = $props();
 
   type Key = "rank" | "name" | "errors" | "latency" | "ping" | "discord" | "youtube" | "steam" | "epic" | "dbd" | "blocked" | "fail" | "ok";
   interface Item {
@@ -73,6 +75,10 @@
 
   const items = $derived(sortBy(results.map((result, index) => ({ result, rank: index + 1 })), value, dir));
 
+  /** The same strategy in both spellings: with and without the `zapret2:` prefix. */
+  const isActive = (name: string) =>
+    (zapret2Name(name) ?? name).toLowerCase() === (zapret2Name(activeStrategy ?? "") ?? (activeStrategy ?? "")).toLowerCase();
+
   function sortOn(column: Key): void {
     if (key === column) {
       dir = dir === "asc" ? "desc" : "asc";
@@ -126,9 +132,13 @@
           {/each}
           {#if onApply}
             <td>
-              <button {disabled} onclick={() => onApply?.(result.name)}>
-                {S.common.apply}
-              </button>
+              {#if isActive(result.name)}
+                <button class="applied ok" disabled><span class="ok">{S.common.applied}</span></button>
+              {:else}
+                <button {disabled} onclick={() => onApply?.(result.name)}>
+                  {S.common.apply}
+                </button>
+              {/if}
             </td>
           {/if}
         </tr>
