@@ -12,6 +12,8 @@
   let suite = $state<Suite>("Standard");
   let repeats = $state(1);
   let chosen = $state<string[]>([]);
+  let search = $state("");
+  let showGames = $state(false);
   let runs = $state<RunSummary[]>([]);
   let shown = $state<TestRun | null>(null);
   // The selection is set once; later reloads keep what the user chose.
@@ -23,6 +25,14 @@
     const inGroup = new Set(list.map((row) => row.name));
     chosen = [...chosen.filter((name) => !inGroup.has(name)), ...(on ? usable(list) : [])];
   }
+
+  /** A checkbox tick without `bind:group`: the strategies the search hides keep their ticks. */
+  function toggle(name: string): void {
+    chosen = chosen.includes(name) ? chosen.filter((n) => n !== name) : [...chosen, name];
+  }
+
+  /** The search matches the shown name, without the `zapret2:` prefix. */
+  const match = (row: StrategyRow) => (zapret2Name(row.name) ?? row.name).toLowerCase().includes(search.trim().toLowerCase());
 
   const suiteName = (value: Suite) => (value === "Standard" ? S.tests.standard : S.tests.dpi);
 
@@ -95,7 +105,23 @@
       <label class="inline"><input type="radio" bind:group={suite} value="Dpi" /> {S.tests.dpi}</label>
     </div>
     <p class="muted">{suite === "Standard" ? S.tests.standardHint : S.tests.dpiHint}</p>
-    {#if rows.length > 0}{@render group(S.tests.group, rows)}{/if}
+    {#if rows.length > 0}
+      <div class="group">
+        <h3>{S.tests.group}</h3>
+        <button type="button" onclick={() => setGroup(rows.filter(match), true)}>{S.tests.all}</button>
+        <button type="button" onclick={() => setGroup(rows.filter(match), false)}>{S.tests.none}</button>
+        <input class="search" bind:value={search} placeholder={S.tests.search} />
+        <span class="muted">{S.tests.chosen(chosen.length, usable(rows).length)}</span>
+      </div>
+      <div class="choices">
+        {#each rows.filter(match) as row (row.name)}
+          <label class="inline">
+            <input type="checkbox" checked={chosen.includes(row.name)} disabled={row.error !== null} onchange={() => toggle(row.name)} />
+            <span>{zapret2Name(row.name) ?? row.name}</span>
+          </label>
+        {/each}
+      </div>
+    {/if}
     <div class="buttons">
       <button class="primary" disabled={app.busy || chosen.length === 0} onclick={start}>{S.tests.start}</button>
       <RepeatsSelect bind:value={repeats} />
@@ -114,13 +140,16 @@
       {#if run.restore_error}<pre class="bad">{run.restore_error}</pre>{/if}
       <div class="buttons">
         {#if first && first.launch_error === null}
-          <button class="primary" disabled={app.busy} onclick={() => apply(first.name)}>{S.tests.applyBest(first.name)}</button>
+          <button class="primary" disabled={app.busy} onclick={() => apply(first.name)}>{S.tests.applyBest(zapret2Name(first.name) ?? first.name)}</button>
         {/if}
         <CopyButton text={() => call(S.failed.report, commands.runReport(run.id))} />
+        {#if run.suite === "Standard"}
+          <label class="inline"><input type="checkbox" bind:checked={showGames} /> {S.tests.games}</label>
+        {/if}
       </div>
       <!-- A run opens in its ranking: another run's sort (maybe a column this suite lacks) and open row do not carry over. -->
       {#key run.id}
-        <ResultsTable suite={run.suite} results={run.strategies} onApply={apply} disabled={app.busy} />
+        <ResultsTable suite={run.suite} results={run.strategies} onApply={apply} disabled={app.busy} {showGames} />
       {/key}
     </section>
   {/if}
@@ -136,29 +165,13 @@
           <td><button class="link" onclick={() => openRun(summary.id)}>{runDate(summary.id)}</button></td>
           <td>{suiteName(summary.suite)}{#if summary.canceled}{" · "}{S.tests.canceled}{/if}</td>
           <td>{S.tests.runCount(summary.strategies)}</td>
-          <td>{summary.best ?? "—"}</td>
+          <td>{#if summary.best}{zapret2Name(summary.best) ?? summary.best}{:else}—{/if}</td>
           <td>{#if summary.best_score}{@render score(summary.suite, summary.best_score)}{/if}</td>
         </tr>
       {/each}
     </tbody>
   </table>
 </section>
-
-{#snippet group(title: string, list: StrategyRow[])}
-  <div class="group">
-    <h3>{title}</h3>
-    <button type="button" onclick={() => setGroup(list, true)}>{S.tests.all}</button>
-    <button type="button" onclick={() => setGroup(list, false)}>{S.tests.none}</button>
-  </div>
-  <div class="choices">
-    {#each list as row (row.name)}
-      <label class="inline">
-        <input type="checkbox" bind:group={chosen} value={row.name} disabled={row.error !== null} />
-        <span>{zapret2Name(row.name) ?? row.name}</span>
-      </label>
-    {/each}
-  </div>
-{/snippet}
 
 {#snippet score(kind: Suite, value: Score)}
   {kind === "Standard"
@@ -168,8 +181,8 @@
 
 <style>
   /* The results table sits in its own component: it follows the buttons above it with the usual gap. */
-  .card :global(.buttons + table) {
-    margin-top: 10px;
+  .card :global(.buttons + .table-scroll) {
+    margin-top: 14px;
   }
 
   .group {
@@ -183,12 +196,23 @@
     margin: 0 8px 0 0;
   }
 
-  /* Checkbox and name in columns of one width, whatever the name's length. */
+  .group .search {
+    margin-left: auto;
+  }
+
+  /* Checkbox and name in columns of one width, whatever the name's length; the scroll keeps it
+  from stretching the card however many strategies there are. */
   .choices {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
     gap: 2px 14px;
     margin-top: 8px;
+    max-height: 150px;
+    overflow-y: auto;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
   }
 
   .choices label.inline {
