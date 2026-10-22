@@ -9,8 +9,7 @@ use std::time::Duration;
 const WAIT: Duration = Duration::from_secs(90);
 
 /// What a refused step names: the user can fix the rights themselves.
-pub const HINT: &str =
-    "not enough rights for this step: run Zapret Hub as root (sudo -E) or set up polkit/sudoers for it";
+pub const HINT: &str = "not enough rights for this step: run Zapret Hub as root (sudo -E) or set up polkit/sudoers for it";
 
 /// Has this process root rights?
 pub fn is_root() -> bool {
@@ -21,10 +20,13 @@ pub fn is_root() -> bool {
 /// The rights-asking program candidates: the first one present wins (`pkexec` only when `sudo` is
 /// not there at all).
 fn wrapper() -> Option<&'static str> {
-    [("/usr/bin/sudo", Some("sudo")), ("/usr/bin/pkexec", Some("pkexec"))]
-        .iter()
-        .find(|(path, _)| std::fs::metadata(path).is_ok())
-        .map(|(_, name)| name.expect("every wrapper carries a name"))
+    [
+        ("/usr/bin/sudo", Some("sudo")),
+        ("/usr/bin/pkexec", Some("pkexec")),
+    ]
+    .iter()
+    .find(|(path, _)| std::fs::metadata(path).is_ok())
+    .map(|(_, name)| name.expect("every wrapper carries a name"))
 }
 
 /// `prog` with `args` under root rights: directly as root, else through the rights wrapper.
@@ -49,8 +51,8 @@ pub fn command(prog: &str, args: &[&str]) -> anyhow::Result<Command> {
 pub fn run(prog: &str, args: &[&str]) -> anyhow::Result<exec::Output> {
     let shown = args.join(" ");
     let mut cmd = command(prog, args).with_context(|| format!("{prog} {shown}"))?;
-    let out = exec::run(&mut cmd, WAIT, None)
-        .with_context(|| format!("starting {prog} {shown}"))?;
+    let out =
+        exec::run(&mut cmd, WAIT, None).with_context(|| format!("starting {prog} {shown}"))?;
     if !out.success() && !is_root() && sudo_refused(&out) {
         anyhow::bail!("{HINT}\n{}", out.describe());
     }
@@ -86,7 +88,10 @@ pub fn write(path: &Path, contents: &str) -> anyhow::Result<()> {
         if !parent.as_os_str().is_empty() {
             let parent_str = parent.display().to_string();
             let out = run("mkdir", &["-p", &parent_str])?;
-            check_out(out, &format!("cannot create directory {}", parent.display()))?;
+            check_out(
+                out,
+                &format!("cannot create directory {}", parent.display()),
+            )?;
         }
     }
     let temp = std::env::temp_dir().join(format!("zapret-hub-write-{}", std::process::id()));
@@ -94,10 +99,7 @@ pub fn write(path: &Path, contents: &str) -> anyhow::Result<()> {
     let copies = [temp.display().to_string(), path.display().to_string()];
     let copied = run("cp", &copies.iter().map(String::as_str).collect::<Vec<_>>());
     let _ = std::fs::remove_file(&temp);
-    copied
-        .and_then(|out| {
-            check_out(out, &format!("cannot write {}", path.display()))
-        })
+    copied.and_then(|out| check_out(out, &format!("cannot write {}", path.display())))
 }
 
 /// Removes `path` as root, best effort: a missing file is fine.

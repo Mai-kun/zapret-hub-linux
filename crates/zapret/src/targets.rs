@@ -1,7 +1,5 @@
 //! `utils\targets.txt`, read the way `test zapret.ps1` reads it.
 
-use crate::folder::Folder;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     pub name: String,
@@ -9,18 +7,6 @@ pub struct Target {
     pub url: Option<String>,
     /// Host or IP the ping goes to.
     pub ping: String,
-}
-
-/// `targets.txt`, or the script's built-in list when the file is missing or empty.
-pub fn load(folder: &Folder) -> Vec<Target> {
-    let parsed = crate::read_text(&folder.utils().join("targets.txt"))
-        .map(|text| parse(&text))
-        .unwrap_or_default();
-    if parsed.is_empty() {
-        defaults()
-    } else {
-        parsed
-    }
 }
 
 /// Lines `Key = "value"`; a repeated key keeps its first place and takes the last value

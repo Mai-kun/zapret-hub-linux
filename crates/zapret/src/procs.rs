@@ -65,6 +65,16 @@ pub fn is_running(image: &str) -> bool {
     !find(image).is_empty()
 }
 
+/// The queue `nfqws2 --qnum=` binds (`zapret2::nft::QNUM`; `zapret` does not depend on `zapret2`).
+const NFQWS2_QUEUE: u32 = 200;
+/// On Linux nothing on the pipes reports capture started (`nfqws2` writes nothing readable, and a
+/// redirected stdout buffers): its readiness is the NFQUEUE being bound — the file that lists the
+/// queues has ours with the child's pid as its portid.
+const QUEUE_FILE: &str = "/proc/net/netfilter/nfnetlink_queue";
+/// How long more to settle once the queue is open: the queue comes up after the Lua init, this is
+/// only the last messages reaching the pipes while the process must stay alive.
+const QUEUE_SETTLE: Duration = Duration::from_millis(150);
+
 /// Ends every process named `image` (SIGKILL), waiting until the name is gone, so their file
 /// handles (WinDivert's among them) are closed before what comes next starts.
 pub fn kill_all(image: &str) -> anyhow::Result<()> {
@@ -95,6 +105,20 @@ pub fn kill_all(image: &str) -> anyhow::Result<()> {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// The queue file's text, as readable as this process can get it: a non-root user cannot — the
+/// kernel makes it `0440 root:root` — so it is read through the same `sudo -n` as `nft`
+/// (`zapret::root`). One short spawn per poll; an engine binds the queue within the first few.
+fn queue_text() -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string(QUEUE_FILE) {
+        return Some(text);
+    }
+    if super::root::is_root() {
+        return None;
+    }
+    let out = super::root::run("cat", &[QUEUE_FILE]).ok()?;
+    (out.success() && !out.stdout.is_empty()).then(|| out.stdout)
 }
 
 /// Starts a process from a snapshot again, without a window, not waiting for it. It gets no
@@ -151,7 +175,7 @@ impl Winws {
             sh
         } else {
             let mut cmd = Command::new(exe);
-            cmd.args(crate::custom::spawn_tokens(tail));
+            cmd.args(crate::spawn_tokens(tail));
             cmd
         };
         let mut child = command
@@ -202,27 +226,58 @@ impl Winws {
     }
 
     /// Waits until winws reports capture started (winws2: `windivert initialized. capture is
-    /// started.`), exits, or `max` passes. One that exited is a launch error: `Err` carries its exit
-    /// status and output.
-    pub fn wait_ready(&mut self, max: Duration) -> Result<(), String> {
+    /// started.`), Linux `nfqws2` binds its NFQUEUE, or `max` passes. One that exited is a launch
+    /// error: `Err` carries its exit status and output. `Ok(true)` says the engine is fully ready —
+    /// on Linux that is the queue, which it binds only after its Lua init.
+    pub fn wait_ready(&mut self, max: Duration) -> Result<bool, String> {
         let started = Instant::now();
         loop {
-            if let Ok(Some(status)) = self.child.try_wait() {
-                // The pipes close with the process: once the readers end, the output is whole.
-                for reader in self.readers.drain(..) {
-                    let _ = reader.join();
-                }
-                return Err(format!(
-                    "{} exited ({status}):\n{}",
-                    self.image,
-                    self.output_text()
-                ));
+            if let Some(error) = self.exited_error() {
+                return Err(error);
             }
             if self.output_text().contains("capture is started") || started.elapsed() >= max {
-                return Ok(());
+                return Ok(self.queue_open(NFQWS2_QUEUE));
             }
-            std::thread::sleep(Duration::from_millis(50));
+            if self.queue_open(NFQWS2_QUEUE) {
+                std::thread::sleep(QUEUE_SETTLE);
+                // The one time the queue hints at the engine's state, it must still be there.
+                if let Some(error) = self.exited_error() {
+                    return Err(error);
+                }
+                return Ok(true);
+            }
+            std::thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    /// The whole output and the status of a winws that ended by itself, with both readers joined:
+    /// the pipes close with the process, so the output is whole.
+    fn exited_error(&mut self) -> Option<String> {
+        let status = self.child.try_wait().ok().flatten()?;
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+        Some(format!(
+            "{} exited ({status}):\n{}",
+            self.image,
+            self.output_text()
+        ))
+    }
+
+    /// Whether queue `qnum` is bound by an open socket in `QUEUE_FILE`: kernel order is column 1
+    /// `queue_num`, column 2 `peer_portid` — nonzero while the owner lives — column 3 the queue
+    /// total (0 around the start): `200 159031 0 2 65531 0 0 254 1`. Which live process it is,
+    /// `try_wait` in the loop already says (ours is the only engine, `stop_engines` saw to it).
+    fn queue_open(&self, qnum: u32) -> bool {
+        let Some(text) = queue_text() else {
+            return false;
+        };
+        let qnum = qnum.to_string();
+        text.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next().is_some_and(|field| *field == qnum)
+                && fields.next().is_some_and(|portid| portid != "0")
+        })
     }
 
     pub fn output_text(&self) -> String {

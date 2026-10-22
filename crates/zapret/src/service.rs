@@ -1,4 +1,4 @@
-//! The zapret systemd service: state through `systemctl`, changes as a unit file exactly like
+//! The zapret2 systemd service: state through `systemctl`, changes as a unit file exactly like
 //! `service.bat` makes them, and the quick check after an install (5.4).
 
 use std::collections::HashMap;
@@ -9,13 +9,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use probe::curl::{CheckKind, CheckStatus};
 
-use crate::batparse::ParsedArgs;
-use crate::folder::Folder;
-
-pub const SERVICE: &str = "zapret";
-/// zapret2's service and process (zapret2 spec 3.1, 6): this crate knows the second engine by
-/// these two names only.
 pub const SERVICE2: &str = "zapret2";
+/// zapret2's engine process: the second engine is known by these two names only.
 pub const WINWS2: &str = "winws2.exe";
 const STRATEGY_VALUE: &str = "zapret-discord-youtube";
 
@@ -74,14 +69,11 @@ pub fn state(name: &str) -> SvcState {
     status(name).map_or(SvcState::NotInstalled, |(state, _)| state)
 }
 
-/// The installed engine's service and process (zapret2 spec 3.1): `zapret2` and `winws2.exe` while
-/// the `zapret2` service exists, else Flowseal's. The app installs one engine at a time; when
-/// `service.bat` puts `zapret` next to `zapret2`, the system checks name the conflict (spec 9).
+/// The installed engine's service and process (zapret2 spec 3.1): only zapret2 is left. On Linux
+/// the engine runs as `nfqws2`, on Windows as `winws2.exe` under the service.
 pub fn active() -> (&'static str, &'static str) {
     if cfg!(target_os = "linux") {
         (SERVICE2, "nfqws2")
-    } else if state(SERVICE2) == SvcState::NotInstalled {
-        (SERVICE, "winws.exe")
     } else {
         (SERVICE2, WINWS2)
     }
@@ -115,9 +107,7 @@ pub fn config(name: &str) -> Option<SvcConfig> {
     }
     Some(SvcConfig {
         image_path: exec_start?,
-        auto_start: cmd("systemctl", &["is-enabled", name])
-            .ok()?
-            .success(),
+        auto_start: cmd("systemctl", &["is-enabled", name]).ok()?.success(),
     })
 }
 
@@ -125,7 +115,12 @@ pub fn config(name: &str) -> Option<SvcConfig> {
 pub fn active_services() -> Vec<(String, String)> {
     let Ok(out) = cmd(
         "systemctl",
-        &["list-units", "--type=service", "--state=running", "--no-legend"],
+        &[
+            "list-units",
+            "--type=service",
+            "--state=running",
+            "--no-legend",
+        ],
     ) else {
         return Vec::new();
     };
@@ -134,10 +129,7 @@ pub fn active_services() -> Vec<(String, String)> {
         .map(|line| {
             let mut fields = line.split_whitespace();
             let name = fields.next().unwrap_or_default().to_owned();
-            let description: String = fields
-                .skip(3)
-                .collect::<Vec<&str>>()
-                .join(" ");
+            let description: String = fields.skip(3).collect::<Vec<&str>>().join(" ");
             (name, description)
         })
         .collect()
@@ -155,13 +147,13 @@ fn markers() -> Option<HashMap<String, String>> {
     serde_json::from_str(&text).ok()
 }
 
-/// The strategy name recorded next to service `name`: `service.bat` writes it for `zapret`, the app
-/// writes `zapret2:<name>` for `zapret2` (zapret2 spec 6).
+/// The strategy name recorded next to service `name`: the app writes `zapret2:<name>` for
+/// `zapret2` (zapret2 spec 6).
 pub fn strategy_of(name: &str) -> Option<String> {
     markers()?.get(name).cloned()
 }
 
-/// The active engine's strategy: a Flowseal name or `zapret2:<name>`.
+/// The active engine's strategy: a `zapret2:<name>`.
 pub fn strategy() -> Option<String> {
     strategy_of(active().0)
 }
@@ -196,15 +188,10 @@ fn unit_path(name: &str) -> PathBuf {
     PathBuf::from(format!("/etc/systemd/system/{name}.service"))
 }
 
-/// `<name>.service` with `ExecStart = bin_path`, wanted by multi-user when `auto_start`, as
-/// `service.bat` makes `zapret`; `zapret2` the same way (zapret2 spec 6). The file goes and the
-/// systemd state changes with root rights.
+/// `<name>.service` with `ExecStart = bin_path`, wanted by multi-user when `auto_start`.
+/// The file goes and the systemd state changes with root rights.
 pub fn create(name: &str, bin_path: &str, auto_start: bool) -> anyhow::Result<()> {
-    let description = if name == SERVICE {
-        "Zapret DPI bypass software"
-    } else {
-        "zapret2 DPI bypass software"
-    };
+    let description = "zapret2 DPI bypass software";
     let wanted = if auto_start {
         "WantedBy=multi-user.target"
     } else {
@@ -237,9 +224,7 @@ fn unit_hooks(name: &str) -> String {
     let Some(nft) = which.as_deref().filter(|shown| shown.starts_with('/')) else {
         return String::new();
     };
-    format!(
-        "ExecStartPre=+{nft} -f {config}\nExecStopPost=+{nft} delete table inet zapret_hub\n"
-    )
+    format!("ExecStartPre=+{nft} -f {config}\nExecStopPost=+{nft} delete table inet zapret_hub\n")
 }
 
 /// Linux: `nfqws2` started as root drops its rights to UID 0x7FFFFFFF, which cannot even enter
@@ -270,21 +255,7 @@ fn uid_this_process() -> Option<String> {
 /// The absolute path of `nft`, what systemd's unit lines need.
 fn which_nft() -> Option<String> {
     let out = cmd("which", &["nft"]).ok()?;
-    out.success()
-        .then(|| out.stdout.trim().to_owned())
-}
-
-/// `:service_install` after the menu: timestamps on, the old service gone, the new one created
-/// and started, the strategy name recorded. One engine at a time (zapret2 spec 6): zapret2 goes
-/// too, so every path that installs a Flowseal strategy takes it down.
-pub fn install(folder: &Folder, name: &str, parsed: &ParsedArgs) -> anyhow::Result<()> {
-    let _ = enable_tcp_timestamps();
-    stop_and_delete(SERVICE)?;
-    stop_and_delete(SERVICE2)?;
-    crate::procs::kill_all(WINWS2)?;
-    create(SERVICE, &parsed.bin_path(&folder.winws()), true)?;
-    root_cmd("systemctl", &["start", SERVICE])?.check()?;
-    set_strategy_of(SERVICE, name)
+    out.success().then(|| out.stdout.trim().to_owned())
 }
 
 /// `systemctl stop` + the unit file gone with errors ignored, as `service.bat` does where it
@@ -306,19 +277,19 @@ pub fn stop_and_delete(name: &str) -> anyhow::Result<()> {
     }
     request_delete(name);
     anyhow::ensure!(
-        wait_until(Duration::from_secs(10), || state(name) == SvcState::NotInstalled),
+        wait_until(Duration::from_secs(10), || state(name)
+            == SvcState::NotInstalled),
         "service {name} is still there after its unit file was removed: close the systemd manager and try again"
     );
     Ok(())
 }
 
-/// `:service_remove`: zapret and zapret2, every winws and winws2. Only the services have to go.
+/// `:service_remove`: the zapret2 service and every engine process. Only the service has to go.
 /// The rest is best effort: a process may end by itself, and a program another holds stays; their
-/// errors go to the journal as warnings. (A WinDivert driver has no unit here.)
+/// errors go to the journal as warnings.
 pub fn remove() -> anyhow::Result<()> {
-    stop_and_delete(SERVICE)?;
     stop_and_delete(SERVICE2)?;
-    for image in ["winws.exe", WINWS2, "nfqws2"] {
+    for image in [WINWS2, "nfqws2"] {
         if let Err(err) = crate::procs::kill_all(image) {
             log::warn!(target: "exec", "{image} was not ended: {err:#}");
         }
@@ -346,7 +317,9 @@ pub fn stop(name: &str) -> anyhow::Result<()> {
 pub fn restart(name: &str) -> anyhow::Result<()> {
     if state(name) == SvcState::NotInstalled {
         if cfg!(target_os = "linux") || name == SERVICE2 {
-            anyhow::bail!("Служба {name} ещё не установлена: сначала примените стратегию кнопкой «Применить»");
+            anyhow::bail!(
+                "Служба {name} ещё не установлена: сначала примените стратегию кнопкой «Применить»"
+            );
         }
         anyhow::bail!("service {name} is not installed");
     }
@@ -354,7 +327,7 @@ pub fn restart(name: &str) -> anyhow::Result<()> {
     start(name)
 }
 
-/// After a list or ipset change: winws reads its files at start.
+/// After a hosts or settings change: the engine re-reads its files at start.
 pub fn restart_if_running(name: &str) -> anyhow::Result<()> {
     if state(name) == SvcState::Running {
         restart(name)
@@ -363,19 +336,21 @@ pub fn restart_if_running(name: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Last 100 lines of system logs from journalctl for the active service (`zapret2`, fallback `zapret`).
+/// Last 100 lines of system logs from journalctl for the zapret2 service.
 pub fn logs() -> String {
-    let read_unit = |unit: &str| -> Option<String> {
-        let res = exec::run(
-            Command::new("journalctl").args(["-u", unit, "-n", "100", "--no-pager"]),
-            Duration::from_secs(10),
-            None,
-        );
-        let out = match res {
-            Ok(out) if out.success() && !out.stdout.contains("Specifying which units") => out,
-            _ => crate::root::run("journalctl", &["-u", unit, "-n", "100", "--no-pager"]).ok()?,
+    const UNIT: &str = SERVICE2;
+    let read = |root: bool| -> Option<String> {
+        let out = if root {
+            crate::root::run("journalctl", &["-u", UNIT, "-n", "100", "--no-pager"]).ok()?
+        } else {
+            exec::run(
+                Command::new("journalctl").args(["-u", UNIT, "-n", "100", "--no-pager"]),
+                Duration::from_secs(10),
+                None,
+            )
+            .ok()?
         };
-        if out.success() {
+        if out.success() && !out.stdout.contains("-- No entries --") {
             let text = out.stdout.trim().to_string();
             if !text.is_empty() {
                 return Some(text);
@@ -383,45 +358,12 @@ pub fn logs() -> String {
         }
         None
     };
-
-    if let Some(logs) = read_unit(SERVICE2) {
-        if !logs.contains("-- No entries --") {
-            return logs;
-        }
-        if let Some(fallback) = read_unit(SERVICE) {
-            if !fallback.contains("-- No entries --") {
-                return fallback;
-            }
-        }
-        return logs;
-    }
-    if let Some(logs) = read_unit(SERVICE) {
-        return logs;
-    }
-    "-- No entries --".to_string()
+    read(true)
+        .or_else(|| read(false))
+        .unwrap_or_else(|| "-- No entries --".to_string())
 }
 
-/// The arguments live in the service: after a game filter change the active strategy is
-/// installed again. A service without a recorded strategy cannot be: that is an error, so the
-/// change is undone instead of reported as done.
-pub fn reinstall_active(folder: &Folder) -> anyhow::Result<()> {
-    if state(SERVICE) == SvcState::NotInstalled {
-        return Ok(());
-    }
-    let Some(name) = strategy_of(SERVICE) else {
-        anyhow::bail!(
-            "the zapret service has no strategy name recorded, so it cannot be installed again with the new game filter: apply a strategy first"
-        );
-    };
-    let file = crate::strategies::find(folder, &name)?;
-    install(
-        folder,
-        &file.name,
-        &crate::batparse::parse_file(folder, &file.path)?,
-    )
-}
-
-/// `/proc/sys/net/ipv4/tcp_timestamps`, the flag that Flowseal's install turns on. `None` when
+/// `/proc/sys/net/ipv4/tcp_timestamps`, the flag the engine's install turns on. `None` when
 /// the file is unreadable.
 pub fn tcp_timestamps() -> Option<bool> {
     parse_timestamps(&std::fs::read_to_string("/proc/sys/net/ipv4/tcp_timestamps").ok()?)
@@ -455,15 +397,13 @@ pub struct QuickCheck {
     pub checks: Vec<QuickItem>,
 }
 
-/// 5.4: the active engine's process runs and the first two URL targets answer `HTTP:OK`.
-/// The first two targets of the Flowseal folder's `targets.txt`, or of the built-in list without
-/// one (zapret2 alone).
-pub fn quick_check(folder: Option<&Folder>) -> QuickCheck {
+/// 5.4: the active engine's process runs and the first two URL targets answer `HTTP:OK`, from
+/// the built-in list.
+pub fn quick_check() -> QuickCheck {
     let (service, image) = active();
     let service = state(service);
     let winws_running = crate::procs::is_running(image);
-    let checks: Vec<QuickItem> = folder
-        .map_or_else(crate::targets::defaults, crate::targets::load)
+    let checks: Vec<QuickItem> = crate::targets::defaults()
         .into_iter()
         .filter_map(|target| Some((target.name, target.url?)))
         .take(2)
@@ -486,11 +426,41 @@ pub fn quick_check(folder: Option<&Folder>) -> QuickCheck {
     }
 }
 
-/// «Применить»: install `name` as the service, wait 2 s, run the quick check.
-pub fn apply(folder: &Folder, name: &str) -> anyhow::Result<QuickCheck> {
-    let file = crate::strategies::find(folder, name)?;
-    let parsed = crate::batparse::parse_file(folder, &file.path)?;
-    install(folder, &file.name, &parsed)?;
-    std::thread::sleep(Duration::from_secs(2));
-    Ok(quick_check(Some(folder)))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_active_service_is_zapret2() {
+        let (service, image) = active();
+        assert_eq!(service, SERVICE2);
+        let expected = if cfg!(target_os = "linux") {
+            "nfqws2"
+        } else {
+            WINWS2
+        };
+        assert_eq!(image, expected);
+    }
+
+    #[test]
+    fn reads_the_timestamps_value_as_the_kernel_keeps_it() {
+        assert_eq!(parse_timestamps("1\n"), Some(true));
+        assert_eq!(parse_timestamps("0\n"), Some(false));
+        assert_eq!(parse_timestamps(" GARAGE "), None);
+    }
+
+    #[test]
+    fn the_states_map_the_systemctl_words() {
+        assert_eq!(map_state("active"), SvcState::Running);
+        assert_eq!(map_state("activating"), SvcState::StartPending);
+        assert_eq!(map_state("deactivating"), SvcState::StopPending);
+        assert_eq!(map_state("inactive"), SvcState::Stopped);
+        assert_eq!(map_state("failed"), SvcState::Stopped);
+        assert_eq!(map_state("whatever"), SvcState::Other);
+    }
+
+    #[test]
+    fn a_service_without_a_recorded_strategy_has_none() {
+        assert_eq!(strategy_of("zapret-hub-no-such-service"), None);
+    }
 }
