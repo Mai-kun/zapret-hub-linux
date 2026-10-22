@@ -3,19 +3,16 @@
   import { call } from "$lib/api";
   import { app, change, refreshLive } from "$lib/app.svelte";
   import { confirmation } from "$lib/confirm.svelte";
-  import { ZAPRET2_TEMPLATE, copyStem, blockSummary, hubStem, mergeNote, ms, nameError, ownName, runDate, uniqueName, variantLabel, zapret2Name } from "$lib/format";
-  import { detectTechniques, summarizeServices, techniqueColor, type Technique } from "$lib/techniques";
+  import { ZAPRET2_TEMPLATE, copyStem, blockSummary, mergeNote, ms, nameError, ownName, runDate, uniqueName, variantLabel, zapret2Name } from "$lib/format";
+  import { detectTechniques, summarizeServices, techniqueColor, TECHNIQUES, type Technique } from "$lib/techniques";
   import { S } from "$lib/strings";
   import RepeatsSelect from "../components/RepeatsSelect.svelte";
   import TargetChecks from "../components/TargetChecks.svelte";
-  import StrategyEditor from "./StrategyEditor.svelte";
   import Zapret2Editor from "./Zapret2Editor.svelte";
 
   let rows = $state<StrategyRow[]>([]);
   let query = $state("");
   let detail = $state<StrategyDetail | null>(null);
-  /** The stem of the custom strategy under edit. */
-  let editing = $state<string | null>(null);
   /** The zapret2 strategy under edit, or a copy not saved yet (zapret2 spec 5.2). */
   let editing2 = $state<{ name: string; from: string; create: boolean; initial?: string } | null>(null);
   /** The «new strategy» form: its name. */
@@ -26,8 +23,25 @@
   let cloneName = $state("");
   let repeats = $state(1);
   let tagsCache = $state<Record<string, Technique[]>>({});
+  /** The tag filter over the list: every strategy, a technique, or the user's own. */
+  let tagFilter = $state<"all" | Technique | "own">("all");
 
-  const visible = $derived(rows.filter((row) => row.name.toLowerCase().includes(query.trim().toLowerCase())));
+  const visible = $derived(
+    rows.filter((row) => {
+      if (!row.name.toLowerCase().includes(query.trim().toLowerCase())) return false;
+      return tagFilter === "all" || (tagFilter === "own" ? row.custom : (tagsCache[row.name] ?? []).includes(tagFilter));
+    }),
+  );
+  /** Times a technique appears in the list: a filter without matches does not appear. */
+  const tagCount = (tag: Technique): number => rows.filter((row) => (tagsCache[row.name] ?? []).includes(tag)).length;
+  /** The open card's tags, once over their changes — not again per render. */
+  const techs = $derived.by(() => {
+    if (!detail) return [];
+    return (
+      tagsCache[detail.row.name] ??
+      detectTechniques((detail.source || "") + " " + detail.blocks.join(" ") + " " + (detail.final_args || ""))
+    );
+  });
   const locked = $derived(app.busy || (app.overview?.testing ?? false));
   /** Names a new one must not take: every name in the list, by its own name. */
   const taken = $derived(rows.map((row) => ownName(row.name)));
@@ -73,17 +87,9 @@
 
   async function clone(source: string): Promise<void> {
     const name = cloneName.trim();
-    if (zapret2Name(source) !== null) {
-      // A zapret2 copy is saved from its editor: the check may want its text changed first.
-      cloneName = "";
-      editing2 = { name, from: source, create: true };
-      return;
-    }
-    const created = await change(S.failed.clone, () => commands.cloneStrategy(source, name));
-    if (!created) return;
+    // A copy is saved from its editor: the check may want its text changed first.
     cloneName = "";
-    await open(hubStem(created.name));
-    editing = hubStem(created.name);
+    editing2 = { name, from: source, create: true };
   }
 
   async function create(): Promise<void> {
@@ -103,14 +109,14 @@
     app.tab = "tests";
   }
 
-  async function remove(record: string, stem: string): Promise<void> {
+  async function removeZapret2(name: string): Promise<void> {
     const sure = await confirmation.ask({
       title: S.strategies.deleteTitle,
-      text: S.strategies.deleteText(stem),
+      text: S.zapret2.deleteText(name),
       yes: S.strategies.delete,
       danger: true,
     });
-    if (sure && (await change(S.failed.deleteCustom, () => commands.deleteCustom(record))) !== undefined) detail = null;
+    if (sure && (await change(S.failed.deleteZapret2, () => commands.deleteZapret2(name))) !== undefined) detail = null;
   }
 
   async function preview(): Promise<void> {
@@ -120,18 +126,35 @@
     if (merging && result) merging.result = result;
   }
 
-  async function removeZapret2(name: string): Promise<void> {
-    const sure = await confirmation.ask({
-      title: S.strategies.deleteTitle,
-      text: S.zapret2.deleteText(name),
-      yes: S.strategies.delete,
-      danger: true,
-    });
-    if (sure && (await change(S.failed.deleteCustom, () => commands.deleteZapret2(name))) !== undefined) detail = null;
+  /** The splitter between the list pane and the detail pane: dragging shifts the column edge. */
+  let split = $state<HTMLElement>();
+  let leftW = $state(360);
+  let dragging = $state(false);
+  const LEFT_MIN = 260;
+
+  function dragStart(event: PointerEvent): void {
+    // Without this the drag also selects the list's text under the pointer.
+    event.preventDefault();
+    const handle = event.currentTarget as HTMLElement;
+    dragging = true;
+    handle.setPointerCapture(event.pointerId);
+  }
+
+  function dragMove(event: PointerEvent): void {
+    if (!dragging || !split) return;
+    const bounds = split.getBoundingClientRect();
+    // 60% at most: the detail pane keeps its share at every window width.
+    leftW = Math.round(Math.min(Math.max(event.clientX - bounds.left, LEFT_MIN), bounds.width * 0.6));
+  }
+
+  function dragEnd(event: PointerEvent): void {
+    const handle = event.currentTarget as HTMLElement;
+    dragging = false;
+    handle.releasePointerCapture(event.pointerId);
   }
 </script>
 
-<div class="split">
+<div class="split" bind:this={split} class:dragging style:grid-template-columns="{leftW}px 10px minmax(0, 1fr)">
   <section class="card scroll">
     {#if app.overview && !app.overview.zapret2.dir}
       <p class="muted">
@@ -145,12 +168,32 @@
         disabled={locked}
         onclick={() => {
           detail = null;
-          editing = null;
           editing2 = null;
           merging = null;
           createError = "";
           creating = { name: uniqueName("my strategy", taken) };
         }}>{S.strategies.newStrategy}</button
+      >
+    </div>
+    <div class="tagbar" role="group" aria-label={S.strategies.filtersTitle}>
+      <button class="tag-filter" class:on={tagFilter === "all"} onclick={() => (tagFilter = "all")}>{S.strategies.allTags}</button>
+      {#each TECHNIQUES as tech (tech)}
+        {@const col = techniqueColor(tech)}
+        {@const count = tagCount(tech)}
+        {#if count > 0}
+          <button
+            class="tag-filter"
+            class:on={tagFilter === tech}
+            style:border-color={col.border}
+            style:color={col.text}
+            onclick={() => (tagFilter = tagFilter === tech ? "all" : tech)}>{tech} {count}</button
+          >
+        {/if}
+      {/each}
+      <button
+        class="tag-filter"
+        class:on={tagFilter === "own"}
+        onclick={() => (tagFilter = tagFilter === "own" ? "all" : "own")}>{S.strategies.ownTags}</button
       >
     </div>
     <div class="buttons folders">
@@ -160,7 +203,6 @@
           disabled={locked}
           onclick={() => {
             detail = null;
-            editing = null;
             editing2 = null;
             creating = null;
             merging = { picked: [], name: uniqueName("circular", taken), result: null };
@@ -174,51 +216,33 @@
       </thead>
       <tbody>
         {#each visible as row (row.name)}
-          {@const tags = tagsCache[row.name]}
           <tr class:selected={detail?.row.name === row.name}>
             <td>
-              <div class="strategy-item">
-                <div class="row">
-                  <button
-                    class="link"
-                    onclick={() => {
-                      editing = null;
-                      editing2 = null;
-                      creating = null;
-                      merging = null;
-                      void open(row.name);
-                    }}>{zapret2Name(row.name) ?? row.name}</button
-                  >
-                  {#if row.active}<span class="badge ok">{S.strategies.active}</span>{/if}
-                  {#if row.custom}<span class="badge muted">{S.strategies.custom}</span>{/if}
-                </div>
-                {#if tags && tags.length > 0}
-                  <div class="tech-tags">
-                    {#each tags as tech (tech)}
-                      {@const col = techniqueColor(tech)}
-                      <span class="tech-tag" style:border-color={col.border} style:background={col.bg} style:color={col.text}>{tech}</span>
-                    {/each}
-                  </div>
-                {/if}
+              <div class="row">
+                <button
+                  class="link"
+                  onclick={() => {
+                    editing2 = null;
+                    creating = null;
+                    merging = null;
+                    void open(row.name);
+                  }}>{zapret2Name(row.name) ?? row.name}</button
+                >
+                {#if row.active}<span class="badge ok">{S.strategies.active}</span>{/if}
+                {#if row.custom}<span class="badge muted">{S.strategies.custom}</span>{/if}
               </div>
             </td>
-            <td>{@render summary(row)}</td>
+            <td>{@render summary(row, true)}</td>
           </tr>
         {/each}
       </tbody>
     </table>
   </section>
 
+  <div class="handle" role="separator" aria-orientation="vertical" onpointerdown={dragStart} onpointermove={dragMove} onpointerup={dragEnd} onpointercancel={dragEnd}></div>
+
   <section class="card scroll">
-    {#if editing}
-      <StrategyEditor
-        stem={editing}
-        onClose={() => {
-          editing = null;
-          void load();
-        }}
-      />
-    {:else if editing2}
+    {#if editing2}
       <Zapret2Editor
         name={editing2.name}
         from={editing2.from}
@@ -299,20 +323,38 @@
         {z2 ?? d.row.name}
         {#if d.row.active}<span class="badge ok">{S.strategies.active}</span>{/if}
         {#if d.row.custom}<span class="badge muted">{S.strategies.custom}</span>{/if}
-        {#if d.row.last?.stale}<span class="badge warn">{S.strategies.stale}</span>{/if}
+        {#if d.row.last?.stale}<span class="badge warn" title={S.strategies.staleHint}>{S.strategies.stale}</span>{/if}
       </h2>
-      {#if tagsCache[d.row.name] || detectTechniques((d.source || '') + ' ' + d.blocks.join(' '))}
-        {@const techs = tagsCache[d.row.name] ?? detectTechniques((d.source || '') + ' ' + d.blocks.join(' '))}
-        {#if techs.length > 0}
-          <div class="tech-tags detail-tags">
-            {#each techs as tech (tech)}
-              {@const col = techniqueColor(tech)}
-              <span class="tech-tag" style:border-color={col.border} style:background={col.bg} style:color={col.text}>{tech}</span>
-            {/each}
-          </div>
-        {/if}
+      {#if techs.length > 0}
+        <div class="tech-tags detail-tags">
+          {#each techs as tech (tech)}
+            {@const col = techniqueColor(tech)}
+            <span class="tech-tag" style:border-color={col.border} style:background={col.bg} style:color={col.text}>{tech}</span>
+          {/each}
+        </div>
       {/if}
       {#if d.row.error}<pre class="bad">{d.row.error}</pre>{/if}
+      <section class="part">
+        <div class="buttons">
+          <button
+            class="primary"
+            disabled={locked || d.row.error !== null}
+            onclick={() => change(S.failed.apply, () => commands.applyStrategy(d.row.name))}>{S.common.apply}</button
+          >
+          <span class={d.row.active ? "ok" : "muted"}>{d.row.active ? S.strategies.activeNow : S.strategies.notActive}</span>
+        </div>
+        <div class="buttons">
+          <button disabled={app.busy || testing || d.row.error !== null} onclick={() => test(d.row.name)}>
+            {S.strategies.runTest}
+          </button>
+          <RepeatsSelect bind:value={repeats} disabled={app.busy || testing || d.row.error !== null} />
+          {#if testing}
+            <span class="muted">{S.strategies.runTestBusy}</span>
+          {:else if d.row.error !== null}
+            <span class="muted">{S.strategies.runTestError}</span>
+          {/if}
+        </div>
+      </section>
 
       {#if d.blocks.length > 0}
         {@const serviceSummaries = summarizeServices(d.blocks)}
@@ -337,7 +379,12 @@
       {#if d.wf || d.blocks.length > 0}
         <section class="part">
           <details class="raw-cli-details">
-            <summary>{S.strategies.showCliArgs}</summary>
+            <summary>
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+              {S.strategies.showCliArgs}
+            </summary>
             {#if d.wf}
               <h4>{z2 === null ? S.strategies.filter : S.zapret2.global}</h4>
               <pre>{d.wf}</pre>
@@ -385,21 +432,11 @@
         <h3>{S.strategies.resultsTitle}</h3>
         {#if d.result}
           <p class="muted">{S.strategies.lastRun(runDate(d.row.last?.run_id ?? ""))}</p>
+          {#if d.row.last?.stale}<p class="muted">{S.strategies.staleHint}</p>{/if}
           <TargetChecks result={d.result} />
         {:else}
           <p class="muted">{S.strategies.untested}</p>
         {/if}
-        <div class="buttons">
-          <button disabled={app.busy || testing || d.row.error !== null} onclick={() => test(d.row.name)}>
-            {S.strategies.runTest}
-          </button>
-          <RepeatsSelect bind:value={repeats} disabled={app.busy || testing || d.row.error !== null} />
-          {#if testing}
-            <span class="muted">{S.strategies.runTestBusy}</span>
-          {:else if d.row.error !== null}
-            <span class="muted">{S.strategies.runTestError}</span>
-          {/if}
-        </div>
       </section>
       <section class="part">
         <h3>{S.strategies.cloneTitle}</h3>
@@ -417,34 +454,21 @@
       </section>
       <section class="part">
         <h3>{S.strategies.applyTitle}</h3>
-        <p>
-          {S.strategies.file}: <code>strategies/{z2 ?? d.row.name}.txt</code>
-          <!-- A built-in zapret2 strategy lives in the app: no file to show. -->
-          {#if z2 === null || d.row.custom}
+        <!-- A built-in zapret2 strategy lives in the app: no file to show. -->
+        {#if z2 !== null && !d.row.custom}
+          <p>{S.strategies.builtinType}</p>
+        {:else}
+          <p>
+            {S.strategies.file}: <code>strategies/{z2 ?? d.row.name}.txt</code>
             <button class="link" onclick={() => call(S.failed.open, commands.openFolder({ Strategy: d.row.name }))}>
               {S.strategies.showFile}
             </button>
-          {/if}
-        </p>
-        {#if d.record}<p class="muted">{S.strategies.clonedFrom(d.record.cloned_from)}</p>{/if}
+          </p>
+        {/if}
         <p>
-          {S.strategies.state}:
-          {#if d.row.active}<span class="ok">{S.strategies.activeNow}</span>{:else}<span class="muted">{S.strategies.notActive}</span>{/if}
+          {S.strategies.result}: {@render summary(d.row)}{#if d.row.last}<span class="muted"> · {runDate(d.row.last.run_id)}</span>{/if}
         </p>
-        <p>{S.strategies.result}: {@render summary(d.row)}{#if d.row.last}<span class="muted"> · {runDate(d.row.last.run_id)}</span>{/if}</p>
         <div class="buttons">
-          <button
-            class="primary"
-            disabled={locked || d.row.error !== null}
-            onclick={() => change(S.failed.apply, () => commands.applyStrategy(d.row.name))}>{S.common.apply}</button
-          >
-          {#if d.record}
-            {@const record = d.record}
-            <button disabled={locked} onclick={() => (editing = d.row.name)}>{S.strategies.edit}</button>
-            <button class="danger" disabled={locked || d.row.active} onclick={() => remove(record.name, d.row.name)}>
-              {S.strategies.delete}
-            </button>
-          {/if}
           {#if z2 !== null && d.row.custom}
             {@const own = z2}
             <button disabled={locked} onclick={() => (editing2 = { name: own, from: d.row.name, create: false })}>
@@ -462,7 +486,7 @@
   </section>
 </div>
 
-{#snippet summary(row: StrategyRow)}
+{#snippet summary(row: StrategyRow, /** Left list: a stale icon instead of a text badge. */ compact = false)}
   {#if row.error}
     <span class="bad">{S.strategies.notStrategy}</span>
   {:else if !row.last}
@@ -476,7 +500,9 @@
         ? S.strategies.score(score.total - score.ok, score.total, ms(score.median_ms))
         : S.strategies.dpiScore(score.likely_blocked, score.fail)}
     </span>
-    {#if row.last.stale}<span class="badge warn">{S.strategies.stale}</span>{/if}
+    {#if row.last.stale}
+      <span class="badge warn mini" title={S.strategies.staleHint}>{compact ? "↻" : S.strategies.stale}</span>
+    {/if}
   {/if}
 {/snippet}
 
@@ -507,10 +533,57 @@
 
   .split {
     display: grid;
-    grid-template-columns: minmax(340px, 2fr) 3fr;
-    gap: 14px;
+    gap: 4px;
     min-height: 0;
     flex: 1;
+    /* The detail card scrolls inside itself: main keeps a single scrollbar out. */
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  .split.dragging {
+    /* A drag at the border must not select the strategy text under the pointer. */
+    user-select: none;
+    cursor: col-resize;
+  }
+
+  /* 10px of capture around a 2px line: thin to look at, easy to grab. */
+  .handle {
+    cursor: col-resize;
+    display: flex;
+    justify-content: center;
+    touch-action: none;
+  }
+
+  .handle::after {
+    content: "";
+    width: 2px;
+    height: 100%;
+    border-radius: 1px;
+    background: var(--border);
+  }
+
+  .handle:hover::after,
+  .split.dragging .handle::after {
+    background: var(--accent);
+  }
+
+  .tagbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0;
+  }
+
+  .tag-filter {
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: 6px;
+  }
+
+  .tag-filter.on {
+    background: var(--hover);
+    font-weight: 600;
   }
 
   .search {
@@ -530,17 +603,10 @@
     white-space: normal;
   }
 
-  .strategy-item {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
   .tech-tags {
     display: inline-flex;
     flex-wrap: wrap;
     gap: 4px;
-    margin-top: 2px;
   }
 
   .tech-tags.detail-tags {
@@ -596,9 +662,29 @@
   }
 
   .raw-cli-details summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     cursor: pointer;
+    list-style: none;
+    line-height: 1;
+    margin: 0;
+    padding: 4px 0;
     font-weight: 600;
     color: var(--accent);
+  }
+
+  .raw-cli-details summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .raw-cli-details summary svg {
+    flex-shrink: 0;
+    transition: transform 0.15s ease;
+  }
+
+  .raw-cli-details[open] > summary svg {
+    transform: rotate(90deg);
   }
 
   .raw-cli-details summary:hover {

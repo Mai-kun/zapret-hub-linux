@@ -54,7 +54,7 @@
     const draft = text;
     status = "";
     const saved = current.trim();
-    const check = await change(S.failed.saveCustom, () => commands.saveZapret2(saved, draft, create));
+    const check = await change(S.failed.saveZapret2, () => commands.saveZapret2(saved, draft, create));
     if (check === undefined) return;
     // The active strategy was installed again: its quick check is worth reading before closing.
     if (check) status = `${check.ok ? S.editor.appliedOk : S.editor.appliedFailed}\n${quickSummary(check)}`;
