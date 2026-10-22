@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Rule, StrategyResult } from "./ipc/bindings";
-import { copyStem, blockSummary, bytes, programName, proxyLabel, routeDraft, routeSummary, viaLabel, circularFilter, desyncLabel, estimateMinutes, listChoices, mergeNote, variantLabel, zapret2Ready, latencySpread, latestPerSuite, localizeError, nameError, ownName, profileStats, runDate, uniqueName, zapret2Name } from "./format";
+import { copyStem, blockSummary, bytes, programName, proxyLabel, routeDraft, routeFieldText, routeSummary, viaLabel, circularFilter, desyncLabel, estimateMinutes, listChoices, mergeNote, variantLabel, zapret2Ready, latencySpread, latestPerSuite, localizeError, nameError, ownName, profileStats, runDate, uniqueName, zapret2Name } from "./format";
 import { S } from "./strings";
 
 describe("blockSummary", () => {
@@ -186,6 +186,15 @@ describe("routes", () => {
     const form = { name: " Discord целиком ", enabled: true, protocol: "both", ports: "", ips: "", domains: " discord.com\n\ndiscord.media \n", apps: "" } as const;
     expect(routeDraft(form)).toEqual({ name: "Discord целиком", enabled: true, protocol: "both", ports: [], ips: [], domains: ["discord.com", "discord.media"], apps: [] });
     expect(routeDraft({ ...form, ips: "1.1.1.0/24\r\n2.2.2.2", domains: "" })).toMatchObject({ ips: ["1.1.1.0/24", "2.2.2.2"], domains: [] });
+  });
+  it("reads the compact ports field: a line, a comma or both", () => {
+    const form = { name: "Telegram", enabled: true, protocol: "both", ports: "", ips: "", domains: "", apps: "" } as const;
+    expect(routeDraft({ ...form, ports: "443, 80\n5222-5230" })).toMatchObject({ ports: ["443", "80", "5222-5230"] });
+  });
+  it("says the name and targets checks in Russian", () => {
+    expect(routeFieldText({ field: "name", message: "1-40 characters: Latin or Cyrillic letters, digits, space, - _ .; starts with a letter or digit" })).toBe(S.routes.errors.name);
+    expect(routeFieldText({ field: "ips", message: "a rule needs at least one target: ips, domains or apps" })).toBe(S.routes.errors.targets);
+    expect(routeFieldText({ field: "ports", message: "\"x\" is not a port or a range a-b within 1-65535" })).toContain("is not a port");
   });
   it("counts programs and names a program by its file", () => {
     const dbd: Rule = { name: "Dead by Daylight", enabled: true, protocol: "both", ports: [], ips: [], domains: ["bhvrdbd.com"], apps: ["DeadByDaylight-Win64-Shipping.exe"] };

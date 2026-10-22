@@ -1,4 +1,4 @@
-import type { CheckStatus, DpiStatus, Info, MergeNote, ProfileScore, Protocol, ProxyState, QuickCheck, Rule, StrategyResult, Suite, Traffic, Via } from "./ipc/bindings";
+import type { CheckStatus, DpiStatus, FieldError, Info, MergeNote, ProfileScore, Protocol, ProxyState, QuickCheck, Rule, StrategyResult, Suite, Traffic, Via } from "./ipc/bindings";
 import { plural, S } from "./strings";
 
 export function ms(value: number | null | undefined): string {
@@ -278,9 +278,25 @@ export const lines = (text: string): string[] =>
     .map((line) => line.trim())
     .filter(Boolean);
 
-/** The rule the editor's fields make, as it is checked and saved. */
+/** The rule the editor's fields make, as it is checked and saved. Ports accept a line, a comma or both. */
 export function routeDraft(form: { name: string; enabled: boolean; protocol: Protocol; ports: string; ips: string; domains: string; apps: string }): Rule {
-  return { name: form.name.trim(), enabled: form.enabled, protocol: form.protocol, ports: lines(form.ports), ips: lines(form.ips), domains: lines(form.domains), apps: lines(form.apps) };
+  return {
+    name: form.name.trim(),
+    enabled: form.enabled,
+    protocol: form.protocol,
+    ports: form.ports.split(/[\n,]+/).map((p) => p.trim()).filter(Boolean),
+    ips: lines(form.ips),
+    domains: lines(form.domains),
+    apps: lines(form.apps),
+  };
+}
+
+/** The check's `name` and `targets` messages in Russian; the port, subnet, domain and program
+ * messages appear only around text the user typed, so they stay as written. */
+export function routeFieldText(error: FieldError): string {
+  if (error.field === "name" && error.message.includes("1-40 characters")) return S.routes.errors.name;
+  if (error.field === "ips" && error.message.includes("at least one target")) return S.routes.errors.targets;
+  return error.message;
 }
 
 /** The file name of a program path; `—` when unknown. */

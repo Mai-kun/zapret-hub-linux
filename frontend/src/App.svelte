@@ -40,7 +40,7 @@
   <div class="shell">
     <nav>
       {#each TABS as tab (tab.id)}
-        <button class="tab" class:active={tab.id === current.id} onclick={() => (app.tab = tab.id)}>{tab.label}</button>
+        <button class="tab" class:active={tab.id === current.id} onclick={() => app.setTab(tab.id)}>{tab.label}</button>
       {/each}
       <div class="nav-controls">
         {#if app.live}<span class="testing warn">{S.overview.testing}</span>{/if}
