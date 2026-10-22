@@ -2,9 +2,9 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "windows")]
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
@@ -308,14 +308,7 @@ fn revoke_flag() -> Option<&'static str> {
 /// `-L -f -s -S`, a 10 s connect timeout, the revocation flag, `no-cache`, through `socks5` when given.
 pub fn get(url: &str, socks5: Option<&str>) -> Command {
     let mut cmd = Command::new("curl");
-    cmd.args([
-        "-L",
-        "-f",
-        "-s",
-        "-S",
-        "--connect-timeout",
-        "10",
-    ]);
+    cmd.args(["-L", "-f", "-s", "-S", "--connect-timeout", "10"]);
     if let Some(flag) = revoke_flag() {
         cmd.arg(flag);
     }

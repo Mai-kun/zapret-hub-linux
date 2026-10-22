@@ -17,7 +17,12 @@ pub fn ping(host: &str, timeout_ms: u32) -> Option<u32> {
     let timeout_s = (timeout_ms / 1000).max(1).to_string();
     let mut cmd = Command::new("ping");
     cmd.args(["-c", "1", "-W", &timeout_s, "-n", &ip.to_string()]);
-    let out = exec::run(&mut cmd, Duration::from_secs(u64::from(timeout_ms / 1000) + 5), None).ok()?;
+    let out = exec::run(
+        &mut cmd,
+        Duration::from_secs(u64::from(timeout_ms / 1000) + 5),
+        None,
+    )
+    .ok()?;
     if !out.success() {
         return None;
     }
