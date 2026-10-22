@@ -33,12 +33,20 @@ pub fn task_entry(exe: &Path) -> String {
 /// The exe an entry's `Exec=` starts.
 pub fn command_of(entry: &str) -> Option<String> {
     let line = entry.lines().find_map(|l| l.strip_prefix("Exec="))?;
-    let rest = line.trim().strip_prefix('"').filter(|rest| rest.contains('"'))?;
-    Some(rest[..rest.find('"')?].replace("\\\"", "\"").replace("\\\\", "\\"))
+    let rest = line
+        .trim()
+        .strip_prefix('"')
+        .filter(|rest| rest.contains('"'))?;
+    Some(
+        rest[..rest.find('"')?]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\"),
+    )
 }
 
 pub fn enable(exe: &Path) -> anyhow::Result<()> {
-    let path = entry_path().ok_or_else(|| anyhow::anyhow!("no home folder for the autostart entry"))?;
+    let path =
+        entry_path().ok_or_else(|| anyhow::anyhow!("no home folder for the autostart entry"))?;
     std::fs::create_dir_all(path.parent().expect("autostart has a parent"))?;
     std::fs::write(path, task_entry(exe))?;
     Ok(())
@@ -70,8 +78,15 @@ mod tests {
     fn the_entry_runs_this_exe_at_logon() {
         let exe = Path::new("/opt/Tools & Apps/zapret-hub");
         let entry = task_entry(exe);
-        assert!(entry.contains(r#"Exec="/opt/Tools & Apps/zapret-hub" --autostart"#), "{entry}");
-        assert_eq!(command_of(&entry).as_deref(), Some("/opt/Tools & Apps/zapret-hub"), "{entry}");
+        assert!(
+            entry.contains(r#"Exec="/opt/Tools & Apps/zapret-hub" --autostart"#),
+            "{entry}"
+        );
+        assert_eq!(
+            command_of(&entry).as_deref(),
+            Some("/opt/Tools & Apps/zapret-hub"),
+            "{entry}"
+        );
         assert!(entry.contains("X-GNOME-Autostart-enabled=true"), "{entry}");
     }
 }
