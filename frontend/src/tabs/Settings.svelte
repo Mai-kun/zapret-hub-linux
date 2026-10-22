@@ -38,7 +38,6 @@
     if (!draft) return;
     const settings: Settings = {
       ...draft,
-      zapret_dir: draft.zapret_dir?.trim() || null,
       zapret2_dir: draft.zapret2_dir?.trim() || null,
       socks5: draft.socks5?.trim() || null,
     };

@@ -44,7 +44,7 @@
       }
     })();
     void (async () => {
-      candidates = (await call(S.failed.wizard, commands.wizardCandidates())) ?? { folders: [], proxies: [] };
+      candidates = (await call(S.failed.wizard, commands.wizardCandidates())) ?? { proxies: [] };
       socks5 = candidates.proxies[0] ?? "";
     })();
   });

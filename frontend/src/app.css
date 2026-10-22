@@ -64,6 +64,17 @@ button.primary {
   color: #fff;
 }
 
+/* Dark theme: --accent is the bright one for links and accents — a primary button of it glows.
+Calm and deep instead, a lighter rim and hover telling where the edges are. */
+:root[data-theme="dark"] button.primary {
+  background: #2d569e;
+  border-color: #416ec2;
+}
+
+:root[data-theme="dark"] button.primary:hover:not(:disabled) {
+  background: #3966b8;
+}
+
 input,
 select,
 textarea {
@@ -179,6 +190,12 @@ pre {
   border-radius: 4px;
   font-size: 12px;
   font-weight: normal;
+}
+
+/* The stale icon in the list: a hint, not a label. */
+.badge.mini {
+  margin-left: 4px;
+  padding: 0 4px;
 }
 
 .choice {
