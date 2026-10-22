@@ -8,12 +8,6 @@ use router::rules::{Preset, Rule};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tester::run::Request as TestRequest;
-use zapret::checks::CheckAction;
-use zapret::custom::CustomStrategy;
-use zapret::fakes::FakeKind;
-use zapret::game_filter::GameFilter;
-use zapret::ipset::IpsetMode;
-use zapret::user_lists::UserList;
 
 /// Grows only with an incompatible change; a new command is not one.
 pub const PROTOCOL: u32 = 4;
@@ -52,20 +46,6 @@ pub enum Request {
     },
     ApplyBest,
     RestartZapret,
-    CloneStrategy {
-        source: String,
-        name: String,
-    },
-    ValidateCustom {
-        strategy: CustomStrategy,
-    },
-    SaveCustom {
-        strategy: CustomStrategy,
-        create: bool,
-    },
-    DeleteCustom {
-        name: String,
-    },
     Zapret2Info,
     ValidateZapret2 {
         text: String,
@@ -90,36 +70,6 @@ pub enum Request {
     },
     RunReport {
         id: String,
-    },
-    GetFlowseal,
-    SetGameFilter {
-        filter: GameFilter,
-    },
-    SetIpsetMode {
-        mode: IpsetMode,
-    },
-    SetCheckUpdates {
-        enabled: bool,
-    },
-    ReplaceFake {
-        kind: FakeKind,
-        source: String,
-    },
-    AddListEntry {
-        list: UserList,
-        entry: String,
-    },
-    RemoveListEntry {
-        list: UserList,
-        entry: String,
-    },
-    UpdateIpset,
-    HostsPlan,
-    ApplyHosts,
-    CheckFlowsealUpdate,
-    SystemChecks,
-    FixCheck {
-        action: CheckAction,
     },
     ClearDiscordCache,
     RemoveService,
@@ -282,18 +232,8 @@ pub enum Outcome {
 mod tests {
     use serde_json::json;
     use tester::model::Suite;
-    use zapret::game_filter::GameFilterMode;
 
     use super::*;
-
-    fn strategy() -> CustomStrategy {
-        CustomStrategy {
-            name: "mine".into(),
-            cloned_from: "general (ALT11)".into(),
-            wf: "--wf-tcp=80,443".into(),
-            blocks: vec!["--filter-tcp=443 --dpi-desync=fake".into()],
-        }
-    }
 
     /// One of each request.
     fn samples() -> Vec<Request> {
@@ -317,20 +257,6 @@ mod tests {
             },
             Request::ApplyBest,
             Request::RestartZapret,
-            Request::CloneStrategy {
-                source: "general (ALT11)".into(),
-                name: "mine".into(),
-            },
-            Request::ValidateCustom {
-                strategy: strategy(),
-            },
-            Request::SaveCustom {
-                strategy: strategy(),
-                create: true,
-            },
-            Request::DeleteCustom {
-                name: "mine".into(),
-            },
             Request::Zapret2Info,
             Request::ValidateZapret2 {
                 text: "--wf-tcp-out=443".into(),
@@ -358,38 +284,6 @@ mod tests {
             },
             Request::RunReport {
                 id: "2026-10-10_05-03-34".into(),
-            },
-            Request::GetFlowseal,
-            Request::SetGameFilter {
-                filter: GameFilter {
-                    mode: GameFilterMode::All,
-                    tcp: "1024-65535".into(),
-                    udp: "1024-65535".into(),
-                },
-            },
-            Request::SetIpsetMode {
-                mode: IpsetMode::Any,
-            },
-            Request::SetCheckUpdates { enabled: false },
-            Request::ReplaceFake {
-                kind: FakeKind::Discord,
-                source: "quic_initial_www_google_com".into(),
-            },
-            Request::AddListEntry {
-                list: UserList::General,
-                entry: "example.com".into(),
-            },
-            Request::RemoveListEntry {
-                list: UserList::IpsetExclude,
-                entry: "203.0.113.0/24".into(),
-            },
-            Request::UpdateIpset,
-            Request::HostsPlan,
-            Request::ApplyHosts,
-            Request::CheckFlowsealUpdate,
-            Request::SystemChecks,
-            Request::FixCheck {
-                action: CheckAction::RemoveWinDivert,
             },
             Request::ClearDiscordCache,
             Request::RemoveService,
@@ -419,9 +313,8 @@ mod tests {
     }
 
     /// Window commands the CLI leaves out (spec 6).
-    const WINDOW_ONLY: [&str; 20] = [
+    const WINDOW_ONLY: [&str; 19] = [
         "detect_folders",
-        "check_folder",
         "check_zapret2_folder",
         "pick_folder",
         // Downloads make a new engine folder: window only, like the folders (cli.md).
