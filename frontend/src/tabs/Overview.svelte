@@ -42,7 +42,7 @@
   <!-- Крупный статус-баннер -->
   <div class="banner {isRunning ? 'active' : 'inactive'}">
     <div class="banner-info">
-      <span class="banner-icon">{isRunning ? "🟢" : "🔴"}</span>
+      <span class="banner-dot"></span>
       <div>
         <h2 class="banner-title">
           {isRunning ? S.overview.bannerActive(cleanStrategy(o.strategy)) : S.overview.bannerInactive}
@@ -58,7 +58,7 @@
         </p>
       </div>
     </div>
-    <div class="buttons">
+    <div class="banner-buttons">
       {#if isRunning}
         <button class="danger" disabled={locked} onclick={() => change(S.failed.removeService, () => commands.removeService())}>
           {S.overview.stopBypass}
@@ -90,7 +90,7 @@
 
   <div class="cards">
     <!-- Единая карточка: Состояние движка -->
-    <section class="card">
+    <section class="card engine">
       <h2>{S.overview.engineState}</h2>
       <div class="engine-grid">
         <div class="engine-row">
@@ -160,23 +160,6 @@
       </div>
     </section>
 
-    <!-- Прокси -->
-    <section class="card">
-      <h2>{S.overview.proxy}</h2>
-      {#if !app.settings?.socks5}
-        <p class="muted">{S.overview.proxyNotSet}</p>
-      {:else}
-        <p>{app.settings.socks5}</p>
-        {#if proxyBusy}
-          <p class="muted">{S.common.checking}</p>
-        {:else if proxy}
-          <p class={proxy.ok ? "ok" : "bad"}>{proxy.ok ? S.overview.proxyOk(ms(proxy.latency_ms)) : S.overview.proxyFailed}</p>
-          {#if proxy.error}<pre>{proxy.error}</pre>{/if}
-        {/if}
-        <div class="buttons"><button disabled={proxyBusy} onclick={checkProxy}>{S.common.check}</button></div>
-      {/if}
-    </section>
-
     <!-- Последний тест -->
     <section class="card">
       <h2>{S.overview.lastTest}</h2>
@@ -206,6 +189,32 @@
         <button disabled={o.testing} onclick={() => (app.tab = "tests")}>{S.overview.runTests}</button>
       </div>
     </section>
+
+    <!-- TG WS Proxy: задел на будущее -->
+    <section class="card">
+      <div class="card-head">
+        <h2>{S.overview.tgProxy}</h2>
+        <span class="badge">{S.overview.tgProxyStatus}</span>
+      </div>
+      <p class="muted">{S.overview.tgProxyDesc}</p>
+    </section>
+
+    <!-- Прокси SOCKS5 -->
+    <section class="card">
+      <h2>{S.overview.proxy}</h2>
+      {#if !app.settings?.socks5}
+        <p class="muted">{S.overview.proxyNotSet}</p>
+      {:else}
+        <p>{app.settings.socks5}</p>
+        {#if proxyBusy}
+          <p class="muted">{S.common.checking}</p>
+        {:else if proxy}
+          <p class={proxy.ok ? "ok" : "bad"}>{proxy.ok ? S.overview.proxyOk(ms(proxy.latency_ms)) : S.overview.proxyFailed}</p>
+          {#if proxy.error}<pre>{proxy.error}</pre>{/if}
+        {/if}
+        <div class="buttons"><button disabled={proxyBusy} onclick={checkProxy}>{S.common.check}</button></div>
+      {/if}
+    </section>
   </div>
 {:else}
   <p class="muted">{S.common.loading}</p>
@@ -220,28 +229,17 @@
     gap: 16px;
     padding: 16px 20px;
     border-radius: 10px;
-    border: 1px solid var(--border);
     margin-bottom: 4px;
   }
 
   .banner.active {
-    background: rgba(31, 157, 85, 0.12);
-    border-color: rgba(31, 157, 85, 0.35);
+    background: color-mix(in srgb, var(--ok) 7%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--ok) 22%, var(--border));
   }
 
   .banner.inactive {
-    background: rgba(214, 69, 69, 0.1);
-    border-color: rgba(214, 69, 69, 0.25);
-  }
-
-  :root[data-theme="dark"] .banner.active {
-    background: rgba(63, 191, 114, 0.15);
-    border-color: rgba(63, 191, 114, 0.3);
-  }
-
-  :root[data-theme="dark"] .banner.inactive {
-    background: rgba(239, 107, 107, 0.12);
-    border-color: rgba(239, 107, 107, 0.25);
+    background: var(--panel);
+    border: 1px solid var(--border);
   }
 
   .banner-info {
@@ -250,9 +248,17 @@
     gap: 14px;
   }
 
-  .banner-icon {
-    font-size: 26px;
-    line-height: 1;
+  /* Спокойный матовый индикатор вместо кислотного эмо-кружка */
+  .banner-dot {
+    width: 10px;
+    height: 10px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--ok) 55%, var(--panel));
+  }
+
+  .banner.inactive .banner-dot {
+    background: color-mix(in srgb, var(--bad) 40%, var(--muted));
   }
 
   .banner-title {
@@ -267,11 +273,73 @@
     color: var(--muted);
   }
 
+  .banner-buttons {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .banner-buttons button {
+    height: 32px;
+    line-height: 1;
+  }
+
+  /* Приглушённая стоп-кнопка вместо яркой красной обводки */
+  .banner-buttons button.danger {
+    border-color: color-mix(in srgb, var(--bad) 45%, var(--border));
+    color: color-mix(in srgb, var(--bad) 70%, var(--text));
+  }
+
+  .cards {
+    grid-template-columns: 1fr;
+  }
+
+  @media (min-width: 1000px) {
+    .cards {
+      grid-template-columns: 1.5fr 1fr;
+    }
+  }
+
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .card h2,
+  .card h3,
+  .card p,
+  .card pre,
+  .card .buttons,
+  .card .engine-grid {
+    margin: 0;
+  }
+
   .engine-grid {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    margin: 10px 0;
+    gap: 14px;
+  }
+
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .badge {
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  /* Одинаковый вертикальный шаг между строками, разделителем, бейджами и кнопками */
+  .engine {
+    padding: 18px 20px;
   }
 
   .engine-row {
@@ -284,9 +352,11 @@
     font-weight: 600;
   }
 
-  .quick-section {
-    margin-top: 10px;
-    padding-top: 10px;
+  .engine .quick-section {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-top: 14px;
     border-top: 1px solid var(--border);
   }
 
@@ -294,7 +364,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    margin-top: 4px;
   }
 
   .check-pill {
