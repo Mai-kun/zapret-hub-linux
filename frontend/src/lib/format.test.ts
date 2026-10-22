@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Rule, StrategyResult } from "./ipc/bindings";
-import { copyStem, blockSummary, bytes, programName, proxyLabel, routeDraft, routeSummary, viaLabel, circularFilter, desyncLabel, estimateMinutes, listChoices, mergeNote, variantLabel, zapret2Ready, latencySpread, latestPerSuite, localizeError, nameError, ownName, runDate, uniqueName, zapret2Name } from "./format";
+import { copyStem, blockSummary, bytes, programName, proxyLabel, routeDraft, routeSummary, viaLabel, circularFilter, desyncLabel, estimateMinutes, listChoices, mergeNote, variantLabel, zapret2Ready, latencySpread, latestPerSuite, localizeError, nameError, ownName, profileStats, runDate, uniqueName, zapret2Name } from "./format";
 import { S } from "./strings";
 
 describe("blockSummary", () => {
@@ -132,8 +132,9 @@ describe("repeats", () => {
   });
 
   it("multiplies the estimate by the passes", () => {
-    expect(estimateMinutes(8, "Standard")).toBe(2);
-    expect(estimateMinutes(8, "Standard", 3)).toBe(6);
+    expect(estimateMinutes(8, "Standard")).toBe(1);
+
+    expect(estimateMinutes(8, "Standard", 3)).toBe(2);
   });
 });
 
@@ -209,5 +210,36 @@ describe("routes", () => {
   it("says how the proxy is", () => {
     expect(proxyLabel({ state: "Ok", latency_ms: 4 })).toBe("прокси отвечает · 4 мс");
     expect(proxyLabel({ state: "Down", error: "refused" })).toBe("прокси недоступен, трафик идёт напрямую");
+  });
+});
+
+describe("profileStats", () => {
+  const check = (host: string, kind: string, status: string, time_ms: number) => ({
+    url: `https://${host}`,
+    checks: [{ kind: kind as "Http" | "Tls12" | "Tls13", status: status as "Ok" | "Unsup", time_ms }],
+  });
+  const result = {
+    name: "zapret2:x",
+    args_sha256: "",
+    launch_error: null,
+    dpi: [],
+    score: { ok: 3, total: 4 },
+    targets: [
+      check("store.steampowered.com", "Tls12", "Ok", 300),
+      check("steam.live.bhvrdbd.com", "Http", "Ok", 500),
+      check("steam.live.bhvrdbd.com", "Tls12", "Ok", 400),
+      check("steam.live.bhvrdbd.com", "Tls13", "Unsup", 200),
+      check("api.epicgames.dev", "Tls12", "Ok", 100),
+      check("gateway.discord.gg", "Tls12", "Ok", 50),
+    ],
+  } as unknown as StrategyResult;
+
+  it("counts Steam, Epic and DbD separately, from the hosts' checks", () => {
+    expect(profileStats(result, "steam")).toEqual({ ok: 1, total: 1, median_ms: 300 });
+    expect(profileStats(result, "dbd")).toEqual({ ok: 2, total: 2, median_ms: 450 });
+    expect(profileStats(result, "epic")).toEqual({ ok: 1, total: 1, median_ms: 100 });
+  });
+  it("is empty without the hosts", () => {
+    expect(profileStats({ ...result, targets: [] }, "steam")).toEqual({ ok: 0, total: 0, median_ms: null });
   });
 });

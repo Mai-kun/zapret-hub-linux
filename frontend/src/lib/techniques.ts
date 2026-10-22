@@ -1,3 +1,13 @@
+/** All techniques, in the order the tab's tag filter lists them. */
+export const TECHNIQUES: readonly Technique[] = [
+  "Fake TLS",
+  "Multisplit",
+  "Fake QUIC",
+  "Disorder",
+  "Syndata",
+  "Fake UDP",
+];
+
 /**
  * Parses DPI circumvention techniques from strategy configurations.
  */

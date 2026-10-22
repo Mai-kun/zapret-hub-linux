@@ -1,8 +1,9 @@
-import type { CheckLevel, CheckStatus, DpiStatus, Info, MergeNote, Protocol, ProxyState, QuickCheck, Rule, StrategyResult, Suite, Traffic, Via } from "./ipc/bindings";
+import type { CheckStatus, DpiStatus, Info, MergeNote, ProfileScore, Protocol, ProxyState, QuickCheck, Rule, StrategyResult, Suite, Traffic, Via } from "./ipc/bindings";
 import { plural, S } from "./strings";
 
 export function ms(value: number | null | undefined): string {
-  return value == null ? "—" : `${value} мс`;
+  // \u00A0 before «мс»: the number never wraps onto the next line in narrow columns.
+  return value == null ? "—" : `${value}\u00A0мс`;
 }
 
 /** `2026-10-10_05-03-34` → `10.10.2026 05:03`. */
@@ -65,13 +66,48 @@ export function quickSummary(check: QuickCheck): string {
     .join("\n");
 }
 
-/** About 15 s a strategy and pass for the standard suite (spec 14), a little more for DPI. */
+/** About 4 s a strategy and pass for the standard suite (the checks run per target and the engine starts within the quarter second), a little more for DPI. */
 export function estimateMinutes(count: number, suite: Suite, repeats = 1): number {
-  return Math.max(1, Math.round((count * repeats * (suite === "Standard" ? 15 : 20)) / 60));
+  return Math.max(1, Math.round((count * repeats * (suite === "Standard" ? 4 : 20)) / 60));
 }
 
 /** The choices of «Повторов» (`tester::run::MAX_REPEATS`). */
 export const REPEATS = [1, 2, 3, 4, 5] as const;
+
+/** Every host of the results table's own columns: Steam's store, Epic Online Services and the DbD game server. */
+export function hostGroup(url: string | null): "steam" | "epic" | "dbd" | null {
+  if (url?.includes("store.steampowered.com")) return "steam";
+  if (url?.includes("api.epicgames.dev")) return "epic";
+  if (url?.includes("steam.live.bhvrdbd.com")) return "dbd";
+  return null;
+}
+
+/** Whether a target's rows hide behind the «Доп. игры (Epic, DbD)» checkbox. */
+export function optionalHost(url: string | null): boolean {
+  const group = hostGroup(url);
+  return group === "epic" || group === "dbd";
+}
+
+/** Steam, Epic or the DbD game server of one strategy's result as `<ok>/<total>` and the median of the passing checks. */
+export function profileStats(
+  result: StrategyResult,
+  group: "steam" | "epic" | "dbd",
+): ProfileScore {
+  // Old runs keep the DbD server's TLS 1.3 check as UNSUP: the server has none, that is not a
+  // miss of its own — with HTTP and TLS 1.2 passing the column reads 2/2 green, not 2/3 yellow.
+  const checks = result.targets
+    .filter((target) => hostGroup(target.url) === group)
+    .flatMap((target) => target.checks)
+    .filter((check) => group !== "dbd" || check.kind !== "Tls13" || check.status !== "Unsup");
+  const times = checks
+    .flatMap((check) => (check.status === "Ok" ? [check.time_ms] : []))
+    .filter((time): time is number => time !== null)
+    .sort((a, b) => a - b);
+  // The median of an even count is the average of its two middle values.
+  const n = times.length;
+  const pair = n % 2 === 1 ? [times[Math.floor(n / 2)] ?? 0, times[Math.floor(n / 2)] ?? 0] : [times[n / 2 - 1] ?? 0, times[n / 2] ?? 0];
+  return { ok: n, total: checks.length, median_ms: n === 0 ? null : Math.round((pair[0]! + pair[1]!) / 2) };
+}
 
 /** The lowest and highest of the passes' median latencies; `null` unless two passes had one. */
 export function latencySpread(result: StrategyResult): { min: number; max: number } | null {
@@ -81,7 +117,6 @@ export function latencySpread(result: StrategyResult): { min: number; max: numbe
 
 export const statusClass: Record<CheckStatus, string> = { Ok: "ok", Ssl: "bad", Unsup: "warn", Error: "bad" };
 export const dpiClass: Record<DpiStatus, string> = { Ok: "ok", Fail: "warn", Unsupported: "muted", LikelyBlocked: "bad" };
-export const levelClass: Record<CheckLevel, string> = { Ok: "ok", Warn: "warn", Problem: "bad" };
 
 /** The newest run of each suite, Standard first. `runs` come newest first, as `listRuns` returns them. */
 export function latestPerSuite<T extends { suite: Suite }>(runs: T[]): T[] {
