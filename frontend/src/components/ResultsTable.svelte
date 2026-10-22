@@ -114,7 +114,7 @@
     <thead>
       <tr>
         {#each columns as column (column)}
-          <th class:num={column !== "name"} title={S.results.hints[column]}>
+          <th class:num={column !== "name"} class:col-name={column === "name"} title={S.results.hints[column]}>
             <button class="head" onclick={() => sortOn(column)}>
               {S.results[column]}{key === column ? (dir === "asc" ? " ↑" : " ↓") : ""}
             </button>
@@ -128,7 +128,7 @@
       {#each items as { result, rank } (result.name)}
         <tr class:selected={open === result.name}>
           {#each columns as column (column)}
-            <td class:num={column !== "name"}>{@render cell(column, result, rank)}</td>
+            <td class:num={column !== "name"} class:col-name={column === "name"}>{@render cell(column, result, rank)}</td>
           {/each}
           {#if onApply}
             <td>
@@ -203,10 +203,24 @@
 {/snippet}
 
 <style>
+  /* Everything is centered except the name column. */
   :global(th.num),
   :global(td.num) {
-    text-align: right;
+    text-align: center;
     font-variant-numeric: tabular-nums;
+  }
+
+  :global(th.col-name),
+  :global(td.col-name) {
+    text-align: left;
+  }
+
+  /* A strategy already in use: calm green, cannot be applied twice. */
+  .applied {
+    border: 1px solid color-mix(in srgb, var(--ok) 35%, var(--border));
+    background: color-mix(in srgb, var(--ok) 8%, transparent);
+    color: var(--ok);
+    cursor: default;
   }
 
   /* The point the resizer's absolute position hangs off. */
@@ -222,18 +236,27 @@
     justify-items: end;
   }
 
-  /* The passes' spread under the median: smaller, so the median still reads first. */
+  /* The passes' spread under the median: smaller, so the median still reads first; centered with the cell. */
   .spread {
     display: block;
+    margin: 0 auto;
     font-size: 0.85em;
   }
 
   .head {
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
     padding: 0;
     border: none;
     background: none;
     color: inherit;
     font-weight: 600;
+  }
+
+  th.col-name .head {
+    justify-content: flex-start;
   }
 
   .col-resizer {
