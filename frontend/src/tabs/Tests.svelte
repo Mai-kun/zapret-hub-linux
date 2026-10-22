@@ -95,7 +95,7 @@
     </div>
   </section>
   <section class="card">
-    <ResultsTable suite={live.request.suite} results={live.results} onApply={apply} disabled={app.busy || live.restoring} />
+    <ResultsTable suite={live.request.suite} results={live.results} onApply={apply} disabled={app.busy || live.restoring} activeStrategy={app.overview?.strategy} />
   </section>
 {:else}
   <section class="card">
@@ -140,7 +140,12 @@
       {#if run.restore_error}<pre class="bad">{run.restore_error}</pre>{/if}
       <div class="buttons">
         {#if first && first.launch_error === null}
-          <button class="primary" disabled={app.busy} onclick={() => apply(first.name)}>{S.tests.applyBest(zapret2Name(first.name) ?? first.name)}</button>
+          {@const best = zapret2Name(first.name) ?? first.name}
+          {@const bestActive =
+            best.toLowerCase() === (zapret2Name(app.overview?.strategy ?? "") ?? (app.overview?.strategy ?? "")).toLowerCase()}
+          <button class="primary" disabled={app.busy || bestActive} onclick={() => apply(first.name)}>
+            {bestActive ? S.tests.bestActive(best) : S.tests.applyBest(best)}
+          </button>
         {/if}
         <CopyButton text={() => call(S.failed.report, commands.runReport(run.id))} />
         {#if run.suite === "Standard"}
@@ -149,7 +154,7 @@
       </div>
       <!-- A run opens in its ranking: another run's sort (maybe a column this suite lacks) and open row do not carry over. -->
       {#key run.id}
-        <ResultsTable suite={run.suite} results={run.strategies} onApply={apply} disabled={app.busy} {showGames} />
+        <ResultsTable suite={run.suite} results={run.strategies} onApply={apply} disabled={app.busy} {showGames} activeStrategy={app.overview?.strategy} />
       {/key}
     </section>
   {/if}

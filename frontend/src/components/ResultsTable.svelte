@@ -121,7 +121,7 @@
             <span class="col-resizer" role="presentation" onpointerdown={resizeStart} onpointermove={resizeMove} onpointerup={resizeEnd} onpointercancel={resizeEnd}></span>
           </th>
         {/each}
-        {#if onApply}<th></th>{/if}
+        {#if onApply}<th class="actions"></th>{/if}
       </tr>
     </thead>
     <tbody>
@@ -131,7 +131,7 @@
             <td class:num={column !== "name"} class:col-name={column === "name"}>{@render cell(column, result, rank)}</td>
           {/each}
           {#if onApply}
-            <td>
+            <td class="actions">
               {#if isActive(result.name)}
                 <button class="applied ok" disabled><span class="ok">{S.common.applied}</span></button>
               {:else}
@@ -213,6 +213,12 @@
   :global(th.col-name),
   :global(td.col-name) {
     text-align: left;
+  }
+
+  /* The column with «Применить» / «Применено ✓». */
+  :global(th.actions),
+  :global(td.actions) {
+    text-align: center;
   }
 
   /* A strategy already in use: calm green, cannot be applied twice. */
