@@ -392,15 +392,28 @@ pub fn args(text: &str) -> String {
         .join(" ")
 }
 
+/// The game filter's port range when it is on: the whole unprivileged range, AWS GameLift (DbD)
+/// included. An empty `--ipset=` file then matches any IP, so the game profiles of the built-in
+/// strategies desync every game server's ports.
+pub const GAME_PORTS: &str = "1024-65535";
+
+/// The ports the placeholders stand for with the game filter off: `12` never matches.
+const GAME_PORTS_OFF: &str = "12";
+
 /// The one command line of a text, for the test, the check and the service alike (spec 5.1):
 /// `--chdir="<root>"`, then the arguments with the placeholders filled in. Every path placeholder
-/// ends in `\`. `%LISTS%` and `%BIN%` come from the engine's (or the app data's) folders, and the
-/// game filter is off, as `service.bat` writes `12`.
-pub fn tail(engine: &Engine, text: &str) -> anyhow::Result<String> {
+/// ends in `\`. `%LISTS%` and `%BIN%` come from the engine's (or the app data's) folders, and
+/// `%GameFilter%`, `%GameFilterTCP%` and `%GameFilterUDP%` stand for the game filter's ports or,
+/// when it is off, `12`, as `service.bat` writes it.
+pub fn tail(engine: &Engine, text: &str, game_filter: bool) -> anyhow::Result<String> {
     let dir = |path: PathBuf| format!("{}{}", path.display(), std::path::MAIN_SEPARATOR);
     let mut args = args(text);
     ensure_stubs(engine);
-    let filter = ("12".to_owned(), "12".to_owned(), "12".to_owned());
+    let filter = if game_filter {
+        (GAME_PORTS, GAME_PORTS, GAME_PORTS)
+    } else {
+        (GAME_PORTS_OFF, GAME_PORTS_OFF, GAME_PORTS_OFF)
+    };
     for (var, value) in [
         ("%LUA%", dir(engine.lua())),
         ("%FILES%", dir(engine.root().join("files"))),

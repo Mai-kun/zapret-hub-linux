@@ -149,7 +149,7 @@ fn the_command_line_fills_every_placeholder() {
                 --lua-init=@\"%LUA%zapret-lib.lua\" --blob=a:@\"%FILES%fake/a.bin\"\n\
                 --hostlist=\"%LISTS%list-general.txt\" --blob=b:@\"%bin%stun.bin\" --filter-tcp=%GameFilter%";
     let root = engine.root().display().to_string();
-    let line = tail(&engine, text).unwrap();
+    let line = tail(&engine, text, false).unwrap();
     assert_eq!(
         line,
         format!(
@@ -181,6 +181,7 @@ fn flowseal_placeholders_use_the_engine_folder_and_the_filter_is_off() {
     let line = tail(
         &engine,
         "--hostlist=\"%lists%list-general.txt\" --wf-tcp-out=%GameFilterTCP%",
+        false,
     )
     .unwrap();
     assert!(line.contains(&format!(
@@ -191,6 +192,27 @@ fn flowseal_placeholders_use_the_engine_folder_and_the_filter_is_off() {
     assert!(line.contains("--wf-tcp-out=12"));
     // The defaults are there for the strategy to read.
     assert!(dir.path().join("lists").join("list-general.txt").is_file());
+}
+
+/// The game filter's ports go in whole: GameLift's matchmaking (DbD) sits anywhere in
+/// 1024–65535, and `--ipset=` over an empty file matches any IP (Flowseal's «ipset any»).
+#[test]
+fn the_game_filter_fills_every_game_port_placeholder() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let line = tail(
+        &engine,
+        "--wf-tcp-out=80,%GameFilterTCP% --wf-udp-out=443,%GameFilterUDP% --filter-tcp=%GameFilter%",
+        true,
+    )
+    .unwrap();
+    for ports in [
+        "--wf-tcp-out=80,1024-65535",
+        "--wf-udp-out=443,1024-65535",
+        "--filter-tcp=1024-65535",
+    ] {
+        assert!(line.contains(ports), "{ports}: {line}");
+    }
 }
 
 /// A lenient first pass, not winws2's own option parsing: step 3 (`--intercept=0`) is the real
@@ -324,7 +346,7 @@ fn every_built_in_strategy_passes_the_static_check_and_names_files_that_exist() 
         .collect();
     assert!(builtin.len() > 2);
     for strategy in builtin {
-        let tail = tail(&engine, &strategy.text).unwrap();
+        let tail = tail(&engine, &strategy.text, true).unwrap();
         check(&engine, &tail).unwrap_or_else(|err| panic!("{}: {err:#}", strategy.name));
         let paths: Vec<&str> = tail
             .split('"')

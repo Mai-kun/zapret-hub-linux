@@ -16,6 +16,10 @@ pub const QNUM: u32 = 200;
 /// NFQWS2_COMPAT: the mark `nfqws2` puts on its own packets (its default), kept out of the queue.
 const FWMARK: &str = "0x40000000";
 
+/// The group the table lets through whole: any process started in it (`sg {BYPASS} "<program>"`)
+/// leaves the queue alone. `nft` names a group of `/etc/group`, so it has to exist.
+pub const GROUP: &str = "zapret-bypass";
+
 /// The table file the `zapret2` service's `ExecStartPre` applies and `ExecStopPost` deletes.
 pub const CONFIG: &str = "/etc/zapret-hub/nfqws2.nft";
 
@@ -52,8 +56,14 @@ pub fn translate(tail: &str) -> (String, String, String) {
 /// builds the queue's rules again for the `mark`-kept packets to pass, the matched ones entering
 /// queue 200 while the connection is young. Loopback stays out: queued loopback packets stall
 /// local connections, and no DPI lives there.
-pub fn table(tcp_ports: &str, udp_ports: &str) -> String {
-    let mut rules = String::new();
+pub fn table(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> String {
+    // Before the queue rules: the group and the excluded ports go through untouched, and only
+    // the rest of the traffic reaches the queue.
+    let mut rules = format!("        meta skgid {GROUP} return\n");
+    if !excluded_ports.is_empty() {
+        rules.push_str(&format!("        th dport {{ {excluded_ports} }} return\n"));
+        rules.push_str(&format!("        th sport {{ {excluded_ports} }} return\n"));
+    }
     if !tcp_ports.is_empty() {
         rules.push_str(&format!(
             "        tcp dport {{ {tcp_ports} }} ct original packets 1-12 queue num {QNUM} bypass\n"
@@ -96,16 +106,36 @@ pub fn nft_path() -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
+/// The `{GROUP}` entry missing from `/etc/group`: created once as a system group, best effort —
+/// a rights refusal is logged and the next `nft -f` names the missing group in its own error.
+fn ensure_group() {
+    let known = exec::run(
+        Command::new("getent").args(["group", GROUP]),
+        Duration::from_secs(10),
+        None,
+    )
+    .ok()
+    .map(|out| out.success());
+    if known != Some(false) {
+        return; // exists, or `getent` said nothing: nft will name the problem itself
+    }
+    if let Err(err) = zapret::root::run("groupadd", &["--system", GROUP]) {
+        log::warn!("the {GROUP} group was not created: {err:#}");
+    }
+}
+
 /// Writes the table to {CONFIG} under root: the service can apply it at every start.
-pub fn write_config(tcp_ports: &str, udp_ports: &str) -> anyhow::Result<()> {
-    let text = table(tcp_ports, udp_ports);
+pub fn write_config(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> anyhow::Result<()> {
+    let text = table(tcp_ports, udp_ports, excluded_ports);
+    ensure_group();
     zapret::root::write(std::path::Path::new(CONFIG), &text)
 }
 
 /// Applies the table now (the tests run `nfqws2` without a service): the file is a temp one,
 /// `nft -f` reads and keeps it.
-pub fn apply(tcp_ports: &str, udp_ports: &str) -> anyhow::Result<()> {
-    let text = table(tcp_ports, udp_ports);
+pub fn apply(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> anyhow::Result<()> {
+    let text = table(tcp_ports, udp_ports, excluded_ports);
+    ensure_group();
     let file = std::env::temp_dir().join(format!("zapret-hub-nft-{}", std::process::id()));
     std::fs::write(&file, text)?;
     let applied = zapret::root::run("nft", &["-f", file.display().to_string().as_str()]);
@@ -200,7 +230,7 @@ mod tests {
 
     #[test]
     fn the_table_matches_the_readme_shape() {
-        let text = table("443,80", "443");
+        let text = table("443,80", "443", "51413, 6881-6889");
         for part in [
             "table inet zapret_hub",
             "delete table inet zapret_hub",
@@ -208,13 +238,21 @@ mod tests {
             "type filter hook output priority mangle; policy accept;",
             "meta mark & 0x40000000 != 0 return",
             "oifname \"lo\" accept",
+            "meta skgid zapret-bypass return",
+            "th dport { 51413, 6881-6889 } return",
+            "th sport { 51413, 6881-6889 } return",
             "tcp dport { 443,80 } ct original packets 1-12 queue num 200 bypass",
             "udp dport { 443 } ct original packets 1-8 queue num 200 bypass",
         ] {
             assert!(text.contains(part), "{part}: {text}");
         }
-        let empty = table("", "");
+        // The exclusions sit before the queue rules: they leave it, the rest reaches it.
+        let skgid = text.find("meta skgid").unwrap();
+        let queue = text.find("queue num").unwrap();
+        assert!(skgid < queue);
+        let empty = table("", "", "");
         assert!(empty.contains("policy accept;") && !empty.contains("queue num"));
+        assert!(empty.contains("meta skgid") && !empty.contains("th dport"));
     }
 
     #[test]

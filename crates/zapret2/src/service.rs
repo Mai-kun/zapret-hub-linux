@@ -84,8 +84,13 @@ fn run(engine: &Engine, args: &str) -> anyhow::Result<exec::Output> {
 
 /// Steps 2–5 of spec 6: the previous `zapret2` gone, TCP timestamps on, `zapret2` created and
 /// started, its strategy recorded (spec 6). For `nfqws2` the ports go to the nftables config the
-/// unit's `ExecStartPre` applies (spec 6).
-pub fn install(engine: &Engine, strategy: &Strategy, tail: &str) -> anyhow::Result<()> {
+/// unit's `ExecStartPre` applies (spec 6), together with the excluded ports (the exclusions card).
+pub fn install(
+    engine: &Engine,
+    strategy: &Strategy,
+    tail: &str,
+    excluded_ports: &str,
+) -> anyhow::Result<()> {
     service::stop_and_delete(SERVICE2)?;
     zapret::procs::kill_all("nfqws2")?;
     service::stop_and_delete(SERVICE2)?;
@@ -93,7 +98,7 @@ pub fn install(engine: &Engine, strategy: &Strategy, tail: &str) -> anyhow::Resu
     let _ = service::enable_tcp_timestamps();
     let (tail, nft_ports) = real_args(engine, tail);
     if let Some((tcp, udp)) = &nft_ports {
-        crate::nft::write_config(tcp, udp).with_context(|| {
+        crate::nft::write_config(tcp, udp, excluded_ports).with_context(|| {
             format!(
                 "cannot set up the nftables table file {}, which the zapret2 service applies",
                 crate::nft::CONFIG
@@ -106,9 +111,14 @@ pub fn install(engine: &Engine, strategy: &Strategy, tail: &str) -> anyhow::Resu
 }
 
 /// The check of «Применить» (spec 6), run before any snapshot so that a failure changes nothing.
-pub fn prepare(engine: &Engine, home: &Path, name: &str) -> anyhow::Result<(Strategy, String)> {
+pub fn prepare(
+    engine: &Engine,
+    home: &Path,
+    name: &str,
+    game_filter: bool,
+) -> anyhow::Result<(Strategy, String)> {
     let strategy = strategies::find(home, name)?;
-    let tail = strategies::tail(engine, &strategy.text)?;
+    let tail = strategies::tail(engine, &strategy.text, game_filter)?;
     validate(engine, &tail)?;
     Ok((strategy, tail))
 }
@@ -118,16 +128,23 @@ pub fn install_checked(
     engine: &Engine,
     strategy: &Strategy,
     tail: &str,
+    excluded_ports: &str,
 ) -> anyhow::Result<QuickCheck> {
-    install(engine, strategy, tail)?;
+    install(engine, strategy, tail, excluded_ports)?;
     std::thread::sleep(Duration::from_secs(2));
     Ok(service::quick_check())
 }
 
 /// «Применить» for `zapret2:<name>`: the check while nothing has changed yet, then the service.
-pub fn apply(engine: &Engine, home: &Path, name: &str) -> anyhow::Result<QuickCheck> {
-    let (strategy, tail) = prepare(engine, home, name)?;
-    install_checked(engine, &strategy, &tail)
+pub fn apply(
+    engine: &Engine,
+    home: &Path,
+    name: &str,
+    game_filter: bool,
+    excluded_ports: &str,
+) -> anyhow::Result<QuickCheck> {
+    let (strategy, tail) = prepare(engine, home, name, game_filter)?;
+    install_checked(engine, &strategy, &tail, excluded_ports)
 }
 
 /// `save_zapret2` before the file (spec 5.2): the name, `create` against what exists, the whole
@@ -138,9 +155,10 @@ pub fn check_save(
     name: &str,
     text: &str,
     create: bool,
+    game_filter: bool,
 ) -> anyhow::Result<(String, String)> {
     let name = strategies::claim(home, name, create)?;
-    let tail = strategies::tail(engine, text)?;
+    let tail = strategies::tail(engine, text, game_filter)?;
     validate(engine, &tail)?;
     Ok((name, tail))
 }
@@ -153,8 +171,9 @@ pub fn save(
     name: &str,
     text: &str,
     create: bool,
+    game_filter: bool,
 ) -> anyhow::Result<(Strategy, String)> {
-    let (name, tail) = check_save(engine, home, name, text, create)?;
+    let (name, tail) = check_save(engine, home, name, text, create, game_filter)?;
     strategies::write(home, &name, text)?;
     Ok((strategies::find(home, &name)?, tail))
 }

@@ -56,7 +56,7 @@ fn a_save_writes_nothing_until_the_check_passes() {
     // The static check passes; winws2 (an empty file) cannot run, so nothing is saved.
     let err = format!(
         "{:#}",
-        save(&engine, data.path(), "mine", text, true).unwrap_err()
+        save(&engine, data.path(), "mine", text, true, false).unwrap_err()
     );
     assert!(err.contains("Exec format error"), "{err}");
     assert!(!file.exists());
@@ -67,14 +67,15 @@ fn a_save_writes_nothing_until_the_check_passes() {
             data.path(),
             "mine",
             "--hostlist=\"%LISTS%a.txt\"",
-            true
+            true,
+            false
         )
         .unwrap_err()
     );
     assert!(err.contains("Exec format error"), "{err}");
     let err = format!(
         "{:#}",
-        save(&engine, data.path(), "mine", text, false).unwrap_err()
+        save(&engine, data.path(), "mine", text, false, false).unwrap_err()
     );
     assert!(err.contains("no zapret2 strategy of yours"), "{err}");
     assert!(!file.exists());
@@ -94,7 +95,7 @@ fn a_bad_name_is_refused_before_any_file_is_written() {
     ] {
         let err = format!(
             "{:#}",
-            save(&engine, data.path(), name, "--wf-tcp-out=443", true).unwrap_err()
+            save(&engine, data.path(), name, "--wf-tcp-out=443", true, false).unwrap_err()
         );
         assert!(
             err.contains(refusal) && !err.contains("os error 193"),
@@ -115,7 +116,7 @@ fn live() -> (Engine, tempfile::TempDir) {
 fn live_every_built_in_strategy_passes_the_whole_check() {
     let (engine, data) = live();
     for s in strategies::list(data.path()).unwrap() {
-        let tail = strategies::tail(&engine, &s.text).unwrap();
+        let tail = strategies::tail(&engine, &s.text, true).unwrap();
         validate(&engine, &tail).unwrap_or_else(|err| panic!("{}: {err:#}", s.name));
     }
 }
@@ -124,10 +125,15 @@ fn live_every_built_in_strategy_passes_the_whole_check() {
 #[ignore = "needs a zapret2 folder in ZAPRET2_DIR; replaces the zapret and zapret2 services"]
 fn live_apply_zapret2() {
     let (engine, data) = live();
-    let check = zapret2::service::apply(&engine, data.path(), "general").unwrap();
+    let name = std::env::var("ZAPRET2_STRATEGY").unwrap_or_else(|_| "general".into());
+    let check = zapret2::service::apply(&engine, data.path(), &name, true, "").unwrap();
     eprintln!("zapret2: {check:?}");
-    assert_eq!(active(), (SERVICE2, zapret::service::WINWS2));
-    assert_eq!(strategy().as_deref(), Some("zapret2:general"));
+    let active = active();
+    assert_eq!(active.0, SERVICE2, "the zapret2 service: {active:?}");
+    assert_eq!(
+        strategy().as_deref(),
+        Some(format!("zapret2:{name}").as_str())
+    );
 }
 
 #[test]
@@ -139,7 +145,7 @@ fn the_check_before_a_snapshot_changes_nothing_when_it_fails() {
     let text = "--lua-desync=nosuch\n";
     let err = format!(
         "{:#}",
-        zapret2::service::check_save(&engine, data.path(), "mine", text, true).unwrap_err()
+        zapret2::service::check_save(&engine, data.path(), "mine", text, true, false).unwrap_err()
     );
     assert!(err.contains("nosuch"), "{err}");
     assert!(!strategies::dir(data.path()).join("mine.txt").exists());
