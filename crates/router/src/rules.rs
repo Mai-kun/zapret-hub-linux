@@ -31,6 +31,9 @@ pub enum Protocol {
 pub enum Preset {
     DiscordVoice,
     Discord,
+    Cloudflare,
+    Telegram,
+    Twitch,
     #[serde(rename = "dbd")]
     Dbd,
 }
@@ -70,7 +73,12 @@ pub fn preset(preset: Preset) -> Rule {
             protocol: Protocol::Udp,
             ports: vec!["19294-19344".into(), "50000-65535".into()],
             ips: vec!["104.29.0.0/16".into(), "35.217.0.0/16".into()],
-            domains: vec!["discord.media".into()],
+            domains: vec![
+                "discord.media".into(),
+                "discordcdn.com".into(),
+                "discord.dev".into(),
+                "discordstatus.com".into(),
+            ],
             apps: vec![],
         },
         Preset::Discord => Rule {
@@ -85,6 +93,77 @@ pub fn preset(preset: Preset) -> Rule {
                 "discordapp.com",
                 "discordapp.net",
                 "discord.media",
+                "discordcdn.com",
+                "discord.dev",
+                "discordstatus.com",
+            ]
+            .map(String::from)
+            .into(),
+            apps: vec![],
+        },
+        Preset::Cloudflare => Rule {
+            name: "Cloudflare".into(),
+            enabled: true,
+            protocol: Protocol::Both,
+            ports: vec![],
+            ips: vec!["1.1.1.1".into()],
+            domains: [
+                "cloudflare.com",
+                "cloudflare-dns.com",
+                "cloudflare.net",
+                "cloudflareclient.com",
+                "pages.dev",
+                "workers.dev",
+                "trycloudflare.com",
+                "cloudflareinsights.com",
+                "cfargotunnel.com",
+                "one.one.one.one",
+            ]
+            .map(String::from)
+            .into(),
+            apps: vec![],
+        },
+        Preset::Telegram => Rule {
+            name: "Telegram".into(),
+            enabled: true,
+            protocol: Protocol::Both,
+            ports: vec!["443".into(), "80".into(), "5222".into()],
+            ips: [
+                "149.154.160.0/20",
+                "91.108.4.0/22",
+                "91.108.56.0/22",
+                "91.108.8.0/22",
+                "91.108.12.0/22",
+                "91.108.16.0/22",
+                "91.108.20.0/22",
+                "91.105.192.0/23",
+                "185.76.151.0/24",
+            ]
+            .map(String::from)
+            .into(),
+            domains: [
+                "telegram.org",
+                "t.me",
+                "telegra.ph",
+                "tdesktop.com",
+                "telesco.pe",
+            ]
+            .map(String::from)
+            .into(),
+            apps: vec![],
+        },
+        Preset::Twitch => Rule {
+            name: "Twitch".into(),
+            enabled: true,
+            protocol: Protocol::Both,
+            ports: vec![],
+            ips: vec![],
+            domains: [
+                "twitch.tv",
+                "twitchcdn.net",
+                "ext-twitch.tv",
+                "ttvnw.net",
+                "jtvnw.net",
             ]
             .map(String::from)
             .into(),
@@ -96,7 +175,14 @@ pub fn preset(preset: Preset) -> Rule {
             protocol: Protocol::Both,
             ports: vec![],
             ips: vec![],
-            domains: vec!["bhvrdbd.com".into()],
+            domains: [
+                "bhvrdbd.com",
+                "steam.live.bhvrdbd.com",
+                "deadbydaylight.com",
+                "bhvronline.com",
+            ]
+            .map(String::from)
+            .into(),
             apps: vec!["DeadByDaylight-Win64-Shipping.exe".into()],
         },
     }
@@ -169,17 +255,18 @@ pub fn covers(domain: &str, name: &str) -> bool {
             .is_some_and(|head| head.ends_with('.'))
 }
 
-/// A file name or an absolute path, either ending in .exe. Like `is_absolute`, but the Windows
-/// forms (`C:\`, `\\server`) count too: a rules file is written the same way on any OS.
+/// A Unix process name (`discord`), an .exe name, or an absolute path (Windows or Unix).
+/// Like `is_absolute`, but the Windows forms (`C:\`, `\\server`) count too: a rules file is
+/// written the same way on any OS.
 fn absolute_path(a: &str) -> bool {
     Path::new(a).is_absolute() || a.starts_with(r"\\") || (a.len() > 2 && a.as_bytes()[1] == b':')
 }
 
-/// A file name or an absolute path, either ending in .exe.
+/// A Unix process name (`discord`), an .exe name (games under Proton/Wine), or a full path
+/// (Windows, `/usr/bin/discord`).
 fn valid_app(a: &str) -> bool {
-    let stem = a.len().checked_sub(4).filter(|&i| a.is_char_boundary(i));
-    let named = stem.is_some_and(|i| i > 0 && a[i..].eq_ignore_ascii_case(".exe"));
-    named
+    !a.trim().is_empty()
+        && a.trim() == a
         && !a.contains(['*', '?', '"', '<', '>', '|'])
         && (absolute_path(a) || !a.contains(['\\', '/', ':']))
 }
@@ -240,7 +327,7 @@ pub fn check(rule: &Rule) -> Vec<FieldError> {
             out.push(err(
                 "apps",
                 format!(
-                    "\"{a}\" is not a program: write its file name like Discord.exe or its full path like C:\\Games\\Discord.exe"
+                    "\"{a}\" is not a program: write its file name like Discord.exe, its full path like C:\\Games\\Discord.exe or /usr/bin/discord"
                 ),
             ));
         }

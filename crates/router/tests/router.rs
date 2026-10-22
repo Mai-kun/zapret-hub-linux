@@ -223,7 +223,7 @@ fn a_domain_rule_is_saved_and_its_names_are_wanted() {
         rules::load(&dir.path().join("routes.toml")).unwrap()[0]
             .domains
             .len(),
-        5
+        8
     );
 }
 
