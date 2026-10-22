@@ -7,8 +7,11 @@
   import { ms } from "$lib/format";
   import { LINKS, S } from "$lib/strings";
   import DownloadEngine from "../components/DownloadEngine.svelte";
+  import Select from "../components/Select.svelte";
 
-  const THEMES: Theme[] = ["system", "light", "dark"];
+  const themeOptions: { value: Theme; label: string }[] = (["system", "light", "dark"] as Theme[]).map(
+    (theme) => ({ value: theme, label: S.settings.themes[theme] }),
+  );
 
   // A copy to edit, saved as a whole, and the settings it was last copied from.
   let draft = $state<Settings | null>(null);
@@ -17,10 +20,21 @@
   let proxy = $state<ProxyStatus | null>(null);
   let saved = $state(false);
   let version = $state("");
+  // The download form of the zapret2 card, opened by its «Скачать релиз…» button.
+  let downloader = $state<{ show: () => Promise<void> } | null>(null);
 
   async function pickZapret2(): Promise<void> {
     const path = await call(S.failed.pick, commands.pickFolder());
     if (path && draft) draft.zapret2_dir = path;
+  }
+
+  /** A folder found where a release usually is: into the field, then checked at once. */
+  async function detectZapret2(): Promise<void> {
+    if (!draft) return;
+    const detected = await call(S.failed.detect, commands.detectFolders());
+    if (!detected?.zapret2) return;
+    draft.zapret2_dir = detected.zapret2;
+    zapret2 = (await call(S.failed.zapret2, commands.checkZapret2Folder(detected.zapret2))) ?? null;
   }
 
   /** The saved folder's version, or why it cannot be used: a new folder is checked by «Сохранить». */
@@ -67,90 +81,147 @@
     });
   });
 
-  onMount(() => void commands.appVersion().then((v) => (version = v)));
+  // The tab opened (or reopened): the honest autostart flag is read again.
+  onMount(() => {
+    void loadSettings();
+    void commands.appVersion().then((v) => (version = v));
+  });
+
+  /** The edits not saved yet: the draft differs from what it was last read from. */
+  const isDirty = $derived(
+    draft !== null && from !== null && JSON.stringify(draft) !== JSON.stringify(from),
+  );
+
+  onMount(() => {
+    // The tab guard for «Уйти без сохранения», cleared when the tab is left or closed.
+    app.unsaved = () => isDirty;
+    return () => (app.unsaved = null);
+  });
+
+  /** The window closed with unsaved edits: the browser/webview asks like at a tab switch. */
+  function onBeforeUnload(event: BeforeUnloadEvent): void {
+    if (isDirty) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+  }
 </script>
 
+<svelte:window onbeforeunload={onBeforeUnload} />
+
 {#if draft}
-  <section class="card">
-    <h2>{S.settings.zapret2}</h2>
-    <p class="muted">{S.settings.zapret2Hint}</p>
-    <div class="row">
+  <div class="stack">
+    <section class="card">
+      <h2>{S.settings.zapret2}</h2>
+      <p class="muted">{S.settings.zapret2Hint}</p>
       <input
-        class="grow"
+        class="wide"
         bind:value={draft.zapret2_dir}
         placeholder={S.settings.zapret2Example}
         aria-label={S.settings.zapret2}
       />
-      <button onclick={pickZapret2}>{S.settings.pick}</button>
-    </div>
-    {#if zapret2?.dir}
-      {#if zapret2.error}
-        <pre class="bad">{zapret2.error}</pre>
-      {:else}
-        <p class="ok">{S.settings.zapret2Ok(zapret2.version, zapret2.compat)}</p>
+      {#if zapret2?.dir}
+        {#if zapret2.error}
+          <pre class="bad">{zapret2.error}</pre>
+        {:else}
+          <p class="ok">{S.settings.zapret2Ok(zapret2.version, zapret2.compat)}</p>
+        {/if}
       {/if}
-    {/if}
-    <DownloadEngine
-      engine="Zapret2"
-      ondone={async (dir) => {
-        if (!draft) return;
-        draft.zapret2_dir = dir;
-        zapret2 = (await call(S.failed.zapret2, commands.checkZapret2Folder(dir))) ?? null;
-      }}
-    />
-    <button class="link" onclick={() => call(S.failed.open, commands.openUrl(LINKS.zapret2))}>
-      {S.settings.zapret2Releases}
-    </button>
-  </section>
+      <div class="buttons">
+        <button onclick={pickZapret2}>{S.settings.pick}</button>
+        <button onclick={detectZapret2}>{S.settings.detect}</button>
+        <button onclick={() => downloader?.show()}>{S.download.button}</button>
+        <button
+          disabled={!app.settings?.zapret2_dir}
+          onclick={() => call(S.failed.open, commands.openFolder("Zapret2"))}
+        >
+          {S.settings.openZapret2}
+        </button>
+        <button onclick={() => call(S.failed.open, commands.openUrl(LINKS.zapret2))}>
+          {S.settings.zapret2Releases}
+        </button>
+      </div>
+      <DownloadEngine
+        engine="Zapret2"
+        showTrigger={false}
+        bind:this={downloader}
+        ondone={async (dir) => {
+          if (!draft) return;
+          draft.zapret2_dir = dir;
+          zapret2 = (await call(S.failed.zapret2, commands.checkZapret2Folder(dir))) ?? null;
+        }}
+      />
+    </section>
 
-  <section class="card">
-    <h2>{S.settings.proxy}</h2>
-    <p class="muted">{S.settings.proxyHint}</p>
-    <div class="row">
-      <input class="grow" bind:value={draft.socks5} placeholder="127.0.0.1:2080" aria-label={S.settings.proxyAddress} />
-      <button onclick={checkProxy}>{S.common.check}</button>
+    <section class="card">
+      <h2>{S.settings.filters}</h2>
+      <label class="inline"><input type="checkbox" bind:checked={draft.game_filter} /> {S.settings.gameFilter}</label>
+      <p class="muted">{S.settings.gameFilterHint}</p>
+    </section>
+
+    <section class="card">
+      <h2>{S.settings.proxy}</h2>
+      <p class="muted">{S.settings.proxyHint}</p>
+      <div class="row">
+        <input class="grow" bind:value={draft.socks5} placeholder="127.0.0.1:2080" aria-label={S.settings.proxyAddress} />
+        <button onclick={checkProxy}>{S.common.check}</button>
+      </div>
+      {#if proxy}
+        <p class={proxy.ok ? "ok" : "bad"}>
+          {proxy.ok ? S.overview.proxyOk(ms(proxy.latency_ms)) : S.overview.proxyFailed}
+        </p>
+        {#if proxy.error}<pre>{proxy.error}</pre>{/if}
+      {/if}
+    </section>
+
+    <section class="card">
+      <h2>{S.settings.start}</h2>
+      <label class="inline"><input type="checkbox" bind:checked={draft.autostart} /> {S.settings.autostart}</label>
+      <label class="inline"><input type="checkbox" bind:checked={draft.start_minimized} /> {S.settings.minimized}</label>
+      <div class="row">
+        <span class="muted">{S.settings.theme}</span>
+        <Select bind:value={draft.theme} options={themeOptions} ariaLabel={S.settings.theme} />
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>{S.settings.cli}</h2>
+      <label class="inline"><input type="checkbox" bind:checked={draft.cli_enabled} /> {S.settings.cliEnabled}</label>
+      <p class="muted">{S.settings.cliHint}</p>
+    </section>
+
+    <!-- One button for the cards above: they are saved together. -->
+    <div class="buttons save">
+      <button class="primary" disabled={app.busy} onclick={save}>{S.common.save}</button>
+      {#if saved}<span class="ok">{S.settings.saved}</span>{/if}
     </div>
-    {#if proxy}
-      <p class={proxy.ok ? "ok" : "bad"}>{proxy.ok ? S.overview.proxyOk(ms(proxy.latency_ms)) : S.overview.proxyFailed}</p>
-      {#if proxy.error}<pre>{proxy.error}</pre>{/if}
-    {/if}
-  </section>
 
-  <section class="card">
-    <h2>{S.settings.start}</h2>
-    <label class="inline"><input type="checkbox" bind:checked={draft.autostart} /> {S.settings.autostart}</label>
-    <label class="inline"><input type="checkbox" bind:checked={draft.start_minimized} /> {S.settings.minimized}</label>
-    <div class="row">
-      <label for="theme">{S.settings.theme}</label>
-      <select id="theme" bind:value={draft.theme}>
-        {#each THEMES as theme (theme)}<option value={theme}>{S.settings.themes[theme]}</option>{/each}
-      </select>
-    </div>
-  </section>
-
-  <section class="card">
-    <h2>{S.settings.cli}</h2>
-    <label class="inline"><input type="checkbox" bind:checked={draft.cli_enabled} /> {S.settings.cliEnabled}</label>
-    <p class="muted">{S.settings.cliHint}</p>
-  </section>
-
-  <!-- One button for the four cards above: they are saved together. -->
-  <div class="buttons">
-    <button class="primary" disabled={app.busy} onclick={save}>{S.common.save}</button>
-    {#if saved}<span class="ok">{S.settings.saved}</span>{/if}
+    <section class="card">
+      <h2>{S.settings.about}</h2>
+      {#if version}<p class="muted">{S.settings.version(version)}</p>{/if}
+      <div class="buttons">
+        <button onclick={() => call(S.failed.open, commands.openFolder("Logs"))}>{S.settings.openLogs}</button>
+      </div>
+    </section>
   </div>
-
-  <section class="card">
-    <h2>{S.settings.files}</h2>
-    <div class="buttons">
-      <button onclick={() => call(S.failed.open, commands.openFolder("Logs"))}>{S.settings.openLogs}</button>
-      <button
-        disabled={!app.settings?.zapret2_dir}
-        onclick={() => call(S.failed.open, commands.openFolder("Zapret2"))}
-      >
-        {S.settings.openZapret2}
-      </button>
-    </div>
-    {#if version}<p class="muted">{S.settings.version(version)}</p>{/if}
-  </section>
 {/if}
+
+<style>
+  /* One vertical rhythm: an even gap between the cards, an even inner spacing, no hugging. */
+  .stack {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .stack :global(.card) {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  /* The save block stands off between the settings and the about card. */
+  .save {
+    margin: 14px 0;
+  }
+</style>
