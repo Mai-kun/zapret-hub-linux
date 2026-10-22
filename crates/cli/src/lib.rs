@@ -313,7 +313,7 @@ mod tests {
     }
 
     /// Window commands the CLI leaves out (spec 6).
-    const WINDOW_ONLY: [&str; 19] = [
+    const WINDOW_ONLY: [&str; 23] = [
         "detect_folders",
         "check_zapret2_folder",
         "pick_folder",
@@ -334,9 +334,14 @@ mod tests {
         "import_route_lines",
         // Linux system tools and diagnostics tab
         "stop_service",
+        "start_service",
+        "restart_service",
         "nft_rules",
         "service_logs",
         "flush_dns",
+        // The exclusions card: reading and writing the lists, the queue and the service.
+        "get_exclusions",
+        "save_exclusions",
     ];
 
     /// `("cmd", { a, b })` → the argument names in `bindings.ts`, sorted.

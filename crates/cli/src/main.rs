@@ -1067,9 +1067,15 @@ mod tests {
             panic!("{asked:?}")
         };
         assert_eq!(rule.apps, ["Discord.exe"]);
+        std::fs::write(&file, "[rule]\nprotocol = \"udp\"\napps = [\"discord\"]\n").unwrap();
+        let (_, asked) = drive(&["routes", "add", "v", "--file", path], Vec::new());
+        let [Request::SaveRoute { rule, create: true }] = asked.as_slice() else {
+            panic!("{asked:?}")
+        };
+        assert_eq!(rule.apps, ["discord"], "a Unix process name is a program");
         std::fs::write(
             &file,
-            "[rule]\nprotocol = \"udp\"\nips = [\"1.1.1.1\"]\napps = [\"Discord\"]\n",
+            "[rule]\nprotocol = \"udp\"\nips = [\"1.1.1.1\"]\napps = [\"a?.exe\"]\n",
         )
         .unwrap();
         let (outcome, asked) = drive(&["routes", "add", "v", "--file", path], Vec::new());
