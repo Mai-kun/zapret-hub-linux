@@ -52,7 +52,7 @@ fn zapret2_rows_carry_custom_active_errors_and_stale_results() {
     let text = "# mine\n--wf-tcp-out=443 --lua-init=@\"%LUA%zapret-lib.lua\"\n\
                 --filter-tcp=443 --lua-desync=fake:blob=fake_default_tls\n--new\n--filter-udp=443\n";
     zapret2::strategies::write(engine_dir.path(), "mine", text).unwrap();
-    let tail = zapret2::strategies::tail(&engine, text).unwrap();
+    let tail = zapret2::strategies::tail(&engine, text, false).unwrap();
     let run = TestRun {
         id: "2026-10-11_10-00-00".into(),
         suite: Suite::Standard,
@@ -63,7 +63,8 @@ fn zapret2_rows_carry_custom_active_errors_and_stale_results() {
     };
     history::save(&history::dir(data.path()), &run).unwrap();
 
-    let rows = tester::catalog::rows(Some(&engine), data.path(), Some("ZAPRET2:MINE")).unwrap();
+    let rows =
+        tester::catalog::rows(Some(&engine), data.path(), Some("ZAPRET2:MINE"), false).unwrap();
     let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
     let expected: Vec<String> = built_in()
         .into_iter()
@@ -79,7 +80,8 @@ fn zapret2_rows_carry_custom_active_errors_and_stale_results() {
     );
     assert!(!mine.last.as_ref().unwrap().stale);
 
-    let detail = tester::catalog::detail(Some(&engine), data.path(), None, "zapret2:mine").unwrap();
+    let detail =
+        tester::catalog::detail(Some(&engine), data.path(), None, "zapret2:mine", false).unwrap();
     assert_eq!(
         detail.wf,
         "--wf-tcp-out=443 --lua-init=@\"%LUA%zapret-lib.lua\""
@@ -101,7 +103,7 @@ fn zapret2_rows_carry_custom_active_errors_and_stale_results() {
         &text.replace("udp=443", "udp=80"),
     )
     .unwrap();
-    let rows = tester::catalog::rows(Some(&engine), data.path(), None).unwrap();
+    let rows = tester::catalog::rows(Some(&engine), data.path(), None, false).unwrap();
     assert!(
         rows.last().unwrap().last.as_ref().unwrap().stale,
         "an edit makes the result stale"
@@ -113,7 +115,7 @@ fn zapret2_rows_carry_custom_active_errors_and_stale_results() {
         "",
     )
     .unwrap();
-    let rows = tester::catalog::rows(Some(&engine), data.path(), None).unwrap();
+    let rows = tester::catalog::rows(Some(&engine), data.path(), None, false).unwrap();
     let skipped = rows.last().unwrap();
     assert_eq!(skipped.name, "zapret2:notes.md");
     assert!(skipped.custom && skipped.last.is_none());
@@ -126,16 +128,18 @@ fn zapret2_rows_carry_custom_active_errors_and_stale_results() {
 #[test]
 fn zapret2_alone_names_how_the_list_stays_empty_and_detail_refuses_other_names() {
     let data = tempfile::tempdir().unwrap();
-    let rows = tester::catalog::rows(None, data.path(), None).unwrap();
+    let rows = tester::catalog::rows(None, data.path(), None, false).unwrap();
     assert!(rows.is_empty(), "no engine, no rows");
-    let err = tester::catalog::detail(None, data.path(), None, "zapret2:general").unwrap_err();
+    let err =
+        tester::catalog::detail(None, data.path(), None, "zapret2:general", false).unwrap_err();
     assert!(
         format!("{err:#}").contains("zapret2 folder is not set"),
         "{err:#}"
     );
     let engine_dir = fake_zapret2();
     let engine = zapret2::Engine::open(engine_dir.path()).unwrap();
-    let err = tester::catalog::detail(Some(&engine), data.path(), None, "general").unwrap_err();
+    let err =
+        tester::catalog::detail(Some(&engine), data.path(), None, "general", false).unwrap_err();
     assert!(
         format!("{err:#}").contains("no zapret2 strategy named general"),
         "{err:#}"

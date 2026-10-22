@@ -51,12 +51,13 @@ pub fn rows(
     engine2: Option<&Engine>,
     data_dir: &Path,
     active: Option<&str>,
+    game_filter: bool,
 ) -> anyhow::Result<Vec<StrategyRow>> {
     let latest = crate::history::latest_results(&crate::history::dir(data_dir))?;
     let mut rows: Vec<StrategyRow> = Vec::new();
     if let Some(engine) = engine2 {
         for strategy in zapret2::strategies::list(engine.root())? {
-            rows.push(zapret2_row(engine, &latest, active, &strategy).0);
+            rows.push(zapret2_row(engine, &latest, active, &strategy, game_filter).0);
         }
         // A file dropped into the folder that is not a strategy shows why, not nothing.
         for (file, problem) in zapret2::strategies::skipped(engine.root()) {
@@ -78,6 +79,7 @@ pub fn detail(
     data_dir: &Path,
     active: Option<&str>,
     name: &str,
+    game_filter: bool,
 ) -> anyhow::Result<StrategyDetail> {
     let latest = crate::history::latest_results(&crate::history::dir(data_dir))?;
     let result = latest
@@ -91,7 +93,7 @@ pub fn detail(
     let strategy = zapret2::strategies::find(engine.root(), name)?;
     let args = zapret2::strategies::args(&strategy.text);
     let (wf, blocks) = zapret2::strategies::split(&args);
-    let (row, tail) = zapret2_row(engine, &latest, active, &strategy);
+    let (row, tail) = zapret2_row(engine, &latest, active, &strategy, game_filter);
     Ok(StrategyDetail {
         row,
         wf,
@@ -109,8 +111,9 @@ fn zapret2_row(
     latest: &HashMap<String, Latest>,
     active: Option<&str>,
     strategy: &Strategy,
+    game_filter: bool,
 ) -> (StrategyRow, Option<String>) {
-    let tail = zapret2::strategies::tail(engine, &strategy.text);
+    let tail = zapret2::strategies::tail(engine, &strategy.text, game_filter);
     let sha256 = match &tail {
         Ok(tail) => {
             zapret2::strategies::check(engine, tail).map(|()| zapret::sha256_hex(tail.as_bytes()))

@@ -155,6 +155,7 @@ fn live_run_of_two_strategies() {
         data.path(),
         &request,
         None,
+        true,
         &AtomicBool::new(false),
         &|p| eprintln!("{p:?}"),
     )
@@ -188,6 +189,7 @@ fn live_a_panic_during_the_run_is_passed_on_after_the_restore() {
             data.path(),
             &request,
             None,
+            true,
             &AtomicBool::new(false),
             &|p| {
                 // Zapret is stopped by now: the restore has to bring it back.
@@ -219,6 +221,7 @@ fn live_a_run_records_the_engine_version_and_brings_the_active_one_back() {
         data.path(),
         &request,
         None,
+        true,
         &AtomicBool::new(false),
         &|p| eprintln!("{p:?}"),
     )
@@ -242,11 +245,19 @@ fn live_cancel_stops_after_the_current_strategy() {
         strategies: vec!["zapret2:general (ALT11)".into(), "zapret2:general".into()],
         repeats: 1,
     };
-    let run = tester::run::run(Some(&engine), data.path(), &request, None, &cancel, &|p| {
-        if matches!(p, Progress::Done { .. }) {
-            cancel.store(true, Ordering::Relaxed);
-        }
-    })
+    let run = tester::run::run(
+        Some(&engine),
+        data.path(),
+        &request,
+        None,
+        true,
+        &cancel,
+        &|p| {
+            if matches!(p, Progress::Done { .. }) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        },
+    )
     .unwrap();
     assert!(run.canceled);
     assert_eq!(run.strategies.len(), 1);
