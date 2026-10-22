@@ -72,7 +72,10 @@ impl Engine {
             .components()
             .collect();
         anyhow::ensure!(
-            !zapret::checks::has_cyrillic(&root.to_string_lossy()),
+            !root
+                .to_string_lossy()
+                .chars()
+                .any(|c| matches!(c, 'а'..='я' | 'А'..='Я' | 'ё' | 'Ё')),
             "{} has Cyrillic letters, which winws2 (a Cygwin program) cannot use: move zapret2 to a folder with a Latin path",
             root.display()
         );
@@ -257,9 +260,12 @@ pub fn looks_like_zapret2(dir: &Path) -> bool {
         .any(|root| {
             root.join("lua").join("zapret-lib.lua").is_file()
                 && EXE_DIRS.iter().any(|sub| {
-                    [root.join(sub).join("winws2.exe"), root.join(sub).join("nfqws2")]
-                        .iter()
-                        .any(|exe| exe.is_file())
+                    [
+                        root.join(sub).join("winws2.exe"),
+                        root.join(sub).join("nfqws2"),
+                    ]
+                    .iter()
+                    .any(|exe| exe.is_file())
                 })
         })
 }

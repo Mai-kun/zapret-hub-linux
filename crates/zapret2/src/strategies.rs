@@ -1,12 +1,10 @@
-//! zapret2 strategies (zapret2 spec 5): the built-in texts and the user's `<zapret2 folder>\strategies\<name>.txt`,
+//! zapret2 strategies (zapret2 spec 5): the built-in texts and the user's `<zapret2 folder>\strategies\<name>.txt`
 //! the command line a text becomes, and the static part of the check.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use zapret::batparse::replace_ci;
-use zapret::custom::quoted_tokens;
-use zapret::folder::Folder;
+use zapret::{quoted_tokens, replace_ci};
 
 use crate::{Engine, PREFIX};
 
@@ -109,15 +107,6 @@ const FLOWSEAL: [(&str, &str); 22] = [
     ),
 ];
 
-/// The placeholders that come from the Flowseal folder.
-const FLOWSEAL_VARS: [&str; 5] = [
-    "%LISTS%",
-    "%BIN%",
-    "%GameFilter%",
-    "%GameFilterTCP%",
-    "%GameFilterUDP%",
-];
-
 const DEFAULT_LISTS: [&str; 8] = [
     "list-general.txt",
     "list-google.txt",
@@ -197,8 +186,6 @@ pub struct Strategy {
     /// As written: comment lines and placeholders kept.
     pub text: String,
     pub builtin: bool,
-    /// A built-in copy of a Flowseal strategy (`FLOWSEAL`): not in the default test run.
-    pub flowseal_copy: bool,
 }
 
 impl Strategy {
@@ -297,7 +284,7 @@ fn scan(home: &Path) -> anyhow::Result<Scan> {
             Some("only .txt files are strategies".to_owned())
         } else if is_builtin(stem) {
             Some("named like a built-in strategy".to_owned())
-        } else if let Err(err) = zapret::custom::validate_name(stem) {
+        } else if let Err(err) = zapret::validate_name(stem) {
             Some(format!("{err:#}"))
         } else {
             None
@@ -315,7 +302,6 @@ fn scan(home: &Path) -> anyhow::Result<Scan> {
                 name: stem.to_owned(),
                 text: text.trim_start_matches('\u{feff}').to_owned(),
                 builtin: false,
-                flowseal_copy: false,
             }),
             Err(err) => {
                 log::warn!("{} cannot be read and is skipped: {err}", path.display());
@@ -323,22 +309,20 @@ fn scan(home: &Path) -> anyhow::Result<Scan> {
             }
         }
     }
-    own.sort_by_cached_key(|s| zapret::strategies::natural_key(&s.name));
+    own.sort_by_cached_key(|s| zapret::natural_key(&s.name));
     skipped.sort();
     Ok((own, skipped))
 }
 
 fn builtin() -> impl Iterator<Item = Strategy> {
-    let table = |table: &'static [(&str, &str)], flowseal_copy| {
+    let table = |table: &'static [(&str, &str)]| {
         table.iter().map(move |(name, text)| Strategy {
             name: (*name).to_owned(),
             text: (*text).to_owned(),
             builtin: true,
-            flowseal_copy,
         })
     };
-    // Natural order: the copies are added in it by hand.
-    table(&BUILTIN, false).chain(table(&FLOWSEAL, true))
+    table(&BUILTIN).chain(table(&FLOWSEAL))
 }
 
 fn is_builtin(name: &str) -> bool {
@@ -359,7 +343,7 @@ pub fn find(home: &Path, name: &str) -> anyhow::Result<Strategy> {
 /// The name a save writes under (spec 5.2): a valid one, not a built-in one; new for `create`,
 /// one of the user's otherwise.
 pub fn claim(home: &Path, name: &str, create: bool) -> anyhow::Result<String> {
-    let name = zapret::custom::validate_name(name)?;
+    let name = zapret::validate_name(name)?;
     anyhow::ensure!(
         !is_builtin(&name),
         "{PREFIX}{name} is built in: save a copy under another name"
@@ -410,53 +394,23 @@ pub fn args(text: &str) -> String {
 
 /// The one command line of a text, for the test, the check and the service alike (spec 5.1):
 /// `--chdir="<root>"`, then the arguments with the placeholders filled in. Every path placeholder
-/// ends in `\`. `%LISTS%`, `%BIN%` and the game filter come from the Flowseal folder: without one
-/// they are an error.
-pub fn tail(engine: &Engine, folder: Option<&Folder>, text: &str) -> anyhow::Result<String> {
+/// ends in `\`. `%LISTS%` and `%BIN%` come from the engine's (or the app data's) folders, and the
+/// game filter is off, as `service.bat` writes `12`.
+pub fn tail(engine: &Engine, text: &str) -> anyhow::Result<String> {
     let dir = |path: PathBuf| format!("{}{}", path.display(), std::path::MAIN_SEPARATOR);
     let mut args = args(text);
+    ensure_stubs(engine);
+    let filter = ("12".to_owned(), "12".to_owned(), "12".to_owned());
     for (var, value) in [
         ("%LUA%", dir(engine.lua())),
         ("%FILES%", dir(engine.root().join("files"))),
+        ("%LISTS%", dir(lists_dir(engine))),
+        ("%BIN%", dir(bin_dir(engine))),
+        ("%GameFilterTCP%", filter.0.to_owned()),
+        ("%GameFilterUDP%", filter.1.to_owned()),
+        ("%GameFilter%", filter.2.to_owned()),
     ] {
         args = replace_ci(&args, var, &value);
-    }
-    match folder {
-        Some(folder) => {
-            let filter = zapret::game_filter::try_read(folder)?.vars();
-            for (var, value) in [
-                ("%LISTS%", dir(folder.lists())),
-                ("%BIN%", dir(folder.bin())),
-                ("%GameFilterTCP%", filter.tcp),
-                ("%GameFilterUDP%", filter.udp),
-                ("%GameFilter%", filter.all),
-            ] {
-                args = replace_ci(&args, var, &value);
-            }
-        }
-        None => {
-            if cfg!(target_os = "linux") {
-                ensure_stubs(engine);
-                let filter = zapret::batparse::GameFilterVars::disabled();
-                for (var, value) in [
-                    ("%LISTS%", dir(lists_dir(engine))),
-                    ("%BIN%", dir(bin_dir(engine))),
-                    ("%GameFilterTCP%", filter.tcp),
-                    ("%GameFilterUDP%", filter.udp),
-                    ("%GameFilter%", filter.all),
-                ] {
-                    args = replace_ci(&args, var, &value);
-                }
-            } else {
-                let lower = args.to_ascii_lowercase();
-                if let Some(var) = FLOWSEAL_VARS
-                    .iter()
-                    .find(|var| lower.contains(&var.to_ascii_lowercase()))
-                {
-                    anyhow::bail!("the strategy uses {var}: choose the zapret folder in Settings");
-                }
-            }
-        }
     }
     Ok(format!("--chdir=\"{}\" {args}", engine.root().display()))
 }

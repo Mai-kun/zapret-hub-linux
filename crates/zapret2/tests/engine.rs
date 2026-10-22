@@ -81,7 +81,11 @@ fn a_root_folder_is_refused() {
     // `/` has no parent folder either: the engine's quote could go right after its separator.
     let root = std::path::Path::new("/");
     let err = error(root);
-    assert!(err.contains(root.display().to_string().as_str()) && err.contains("put zapret2 in a folder"), "{err}");
+    assert!(
+        err.contains(root.display().to_string().as_str())
+            && err.contains("put zapret2 in a folder"),
+        "{err}"
+    );
 }
 
 #[test]

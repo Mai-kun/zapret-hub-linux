@@ -26,7 +26,7 @@ pub fn translate(tail: &str) -> (String, String, String) {
     let mut tcp = Vec::new();
     let mut udp = Vec::new();
     let mut kept: Vec<String> = Vec::new();
-    for token in zapret::custom::quoted_tokens(tail) {
+    for token in zapret::quoted_tokens(tail) {
         let plain = token.replace('"', "");
         if let Some(ports) = plain.strip_prefix("--wf-tcp-out=") {
             tcp.push(ports.to_owned());
@@ -79,13 +79,20 @@ pub fn table(tcp_ports: &str, udp_ports: &str) -> String {
 
 /// `nft` on the PATH (`which`), for absolute paths systemd's ExecStart needs.
 pub fn nft_path() -> anyhow::Result<PathBuf> {
-    let which = exec::run(Command::new("which").arg("nft"), Duration::from_secs(10), None)?;
+    let which = exec::run(
+        Command::new("which").arg("nft"),
+        Duration::from_secs(10),
+        None,
+    )?;
     anyhow::ensure!(
         which.success(),
         "nftables was not found on this system: install nftables, nfqws2 needs it"
     );
     let path = which.stdout.trim();
-    anyhow::ensure!(path.starts_with('/'), "which answered with a relative nft: {path}");
+    anyhow::ensure!(
+        path.starts_with('/'),
+        "which answered with a relative nft: {path}"
+    );
     Ok(PathBuf::from(path))
 }
 
