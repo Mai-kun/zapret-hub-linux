@@ -44,6 +44,14 @@ pub fn command_of(entry: &str) -> Option<String> {
     )
 }
 
+/// The autostart as it is on the disk: the entry exists and `Exec=` runs this exe. The user may
+/// have switched it off in the system's settings, so the file, not the saved flag, is the truth.
+pub fn is_enabled(exe: &Path) -> bool {
+    entry_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|text| command_of(&text).is_some_and(|command| Path::new(&command) == exe))
+}
+
 pub fn enable(exe: &Path) -> anyhow::Result<()> {
     let path =
         entry_path().ok_or_else(|| anyhow::anyhow!("no home folder for the autostart entry"))?;
@@ -61,12 +69,10 @@ pub fn disable() -> anyhow::Result<()> {
 
 /// The exe moved since the entry was made, or the entry is gone: it is made again for `exe`.
 pub fn refresh(exe: &Path) -> anyhow::Result<()> {
-    let text = entry_path()
-        .ok_or_else(|| anyhow::anyhow!("no home folder for the autostart entry"))
-        .and_then(|path| std::fs::read_to_string(path).map_err(anyhow::Error::from));
-    match text {
-        Ok(text) if command_of(&text).is_some_and(|command| Path::new(&command) == exe) => Ok(()),
-        _ => enable(exe),
+    if is_enabled(exe) {
+        Ok(())
+    } else {
+        enable(exe)
     }
 }
 

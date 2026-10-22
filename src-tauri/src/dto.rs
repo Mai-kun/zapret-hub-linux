@@ -35,6 +35,15 @@ pub struct Detected {
     pub zapret2: Option<String>,
 }
 
+/// What the «Исключения из zapret» card edits: the two exclude lists of zapret2 (one entry per
+/// line) and the ports that leave the nfqueue.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct Exclusions {
+    pub domains: Vec<String>,
+    pub ips: Vec<String>,
+    pub ports: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 pub enum NoticeLevel {
     Error,

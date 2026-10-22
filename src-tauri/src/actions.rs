@@ -4,12 +4,14 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use anyhow::Context as _;
 use tauri::{AppHandle, Manager as _};
 use tauri_specta::Event as _;
-use zapret::service::{QuickCheck, active};
+use zapret::service::{QuickCheck, SvcState, active};
 
 use crate::dto::{
-    Candidates, Detected, FolderKind, Notice, NoticeLevel, NoticesChanged, Overview, StateChanged,
+    Candidates, Detected, Exclusions, FolderKind, Notice, NoticeLevel, NoticesChanged, Overview,
+    StateChanged,
 };
 use crate::settings::Settings;
 use crate::state::AppState;
@@ -60,10 +62,21 @@ pub fn apply(app: &AppHandle, name: &str) -> anyhow::Result<QuickCheck> {
     let app_state = state(app);
     let engine = app_state.engine2_required()?;
     // The check runs first: a failure changes nothing, no snapshot, no restart (spec 6).
-    let (strategy, tail) =
-        app_state.change(|| zapret2::service::prepare(&engine, engine.root(), name))?;
+    let (strategy, tail) = app_state.change(|| {
+        zapret2::service::prepare(
+            &engine,
+            engine.root(),
+            name,
+            app_state.settings().game_filter,
+        )
+    })?;
     let check = app_state.change_safely("apply", || {
-        zapret2::service::install_checked(&engine, &strategy, &tail)
+        zapret2::service::install_checked(
+            &engine,
+            &strategy,
+            &tail,
+            &app_state.settings().excluded_ports.join(", "),
+        )
     });
     finish_with_check(app, check)
 }
@@ -123,10 +136,19 @@ pub fn save_settings(app: &AppHandle, settings: Settings, pipe: bool) -> anyhow:
             crate::autostart::disable()?;
         }
     }
+    let filter_toggled = settings.game_filter != old.game_filter;
     crate::settings::save(&state.paths.settings(), &settings)?;
     state.set_settings(settings);
     if engine_changed {
         state.migrate_strategies();
+    }
+    // The command line and the nftables queue are baked in at apply: with the filter switched
+    // while a zapret2 strategy is active, it is applied again with the new ports. Skipped during
+    // a test run, whose strategies already carry their own arguments.
+    if filter_toggled && let Some(name) = zapret::service::strategy() {
+        if !state.testing() && zapret2::strip_prefix(&name).is_some() {
+            apply(app, &name)?;
+        }
     }
     // The proxy or a folder, and with it the DLL, may have changed.
     crate::routing::sync(app);
@@ -145,12 +167,15 @@ pub fn save_zapret2(
     let state = state(app);
     let engine = state.engine2_required()?;
     let data = engine.root().to_path_buf();
+    let game_filter = state.settings().game_filter;
+    let excluded = state.settings().excluded_ports.join(", ");
     let full = format!("{}{}", zapret2::PREFIX, name.trim());
     let active = zapret::service::strategy();
     if !create && active.is_some_and(|active| active.eq_ignore_ascii_case(&full)) {
         // The check runs first: a failure changes nothing (spec 6).
-        let (claimed, tail) =
-            state.change(|| zapret2::service::check_save(&engine, &data, name, text, false))?;
+        let (claimed, tail) = state.change(|| {
+            zapret2::service::check_save(&engine, &data, name, text, false, game_filter)
+        })?;
         let saved = zapret2::strategies::Strategy {
             name: claimed,
             text: text.to_owned(),
@@ -158,14 +183,15 @@ pub fn save_zapret2(
         };
         let result = state.change_safely("apply", || {
             zapret2::strategies::write(&data, &saved.name, text)?;
-            zapret2::service::install(&engine, &saved, &tail)?;
+            zapret2::service::install(&engine, &saved, &tail, &excluded)?;
             // winws2 needs a moment before it intercepts anything (spec 5.4).
             std::thread::sleep(Duration::from_secs(2));
             Ok(zapret::service::quick_check())
         });
         return finish_with_check(app, result).map(Some);
     }
-    let result = state.change(|| zapret2::service::save(&engine, &data, name, text, create));
+    let result =
+        state.change(|| zapret2::service::save(&engine, &data, name, text, create, game_filter));
     changed(app);
     result.map(|_| None)
 }
@@ -177,7 +203,12 @@ pub fn overview(app: &AppHandle) -> Overview {
     Overview {
         service_name: service.to_owned(),
         service: zapret::service::state(service),
-        windivert: zapret::service::state("WinDivert"),
+        // No WinDivert on Linux: asking systemd for it only spams `exit code 4` in the journal.
+        windivert: if cfg!(windows) {
+            zapret::service::state("WinDivert")
+        } else {
+            SvcState::NotInstalled
+        },
         winws_running: zapret::procs::is_running(image),
         strategy: zapret::service::strategy(),
         zapret2: zapret2::info(settings.zapret2_dir.as_deref()),
@@ -306,6 +337,119 @@ pub fn open_folder(app: &AppHandle, kind: FolderKind) -> anyhow::Result<()> {
         }
     };
     crate::shell::open(path.as_os_str())
+}
+
+/// The two exclude lists of zapret2 the exclusions card edits, next to the engine's other lists.
+const EXCLUDE_DOMAINS: &str = "list-exclude-user.txt";
+const EXCLUDE_IPS: &str = "ipset-exclude-user.txt";
+
+/// Popular Russian services whose grade of desync of the strategies breaks (defaults the card
+/// shows while the file is empty).
+const DEFAULT_EXCLUDE_DOMAINS: [&str; 15] = [
+    "gosuslugi.ru",
+    "sberbank.ru",
+    "tbank.ru",
+    "tinkoff.ru",
+    "vtb.ru",
+    "alfabank.ru",
+    "avito.ru",
+    "ozon.ru",
+    "wildberries.ru",
+    "kinopoisk.ru",
+    "yandex.ru",
+    "ya.ru",
+    "vk.com",
+    "mail.ru",
+    "rutube.ru",
+];
+
+/// The local networks: nothing at home behind the strategies.
+const DEFAULT_EXCLUDE_IPS: [&str; 4] = [
+    "192.168.0.0/16",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "127.0.0.0/8",
+];
+
+/// One entry per line, blanks dropped; an empty (or missing) file reads the defaults. An entry
+/// starting with `#! ` is one the exclusions card switched off: it comes back as its entry, so
+/// the card can show and restore it (the engine itself reads `#` comments out).
+fn read_list(path: &Path, defaults: &[&str]) -> Vec<String> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines = text
+        .lines()
+        .map(|line| line.trim().strip_prefix("#! ").unwrap_or(line.trim()))
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        defaults.iter().map(|line| line.to_string()).collect()
+    } else {
+        lines
+    }
+}
+
+/// The card's contents: the two lists and the settings' ports.
+pub fn read_exclusions(engine: &zapret2::Engine, settings: &Settings) -> Exclusions {
+    let lists = zapret2::strategies::lists_dir(engine);
+    Exclusions {
+        domains: read_list(&lists.join(EXCLUDE_DOMAINS), &DEFAULT_EXCLUDE_DOMAINS),
+        ips: read_list(&lists.join(EXCLUDE_IPS), &DEFAULT_EXCLUDE_IPS),
+        ports: settings.excluded_ports.clone(),
+    }
+}
+
+/// The card's save: the lists back onto the disk, the ports into the settings file, then the
+/// nftables queue rewritten and the running service put into the new rules.
+pub fn save_exclusions(app: &AppHandle, exclusions: Exclusions) -> anyhow::Result<()> {
+    let state = state(app);
+    let engine = state.engine2_required()?;
+    let lists = zapret2::strategies::lists_dir(&engine);
+    std::fs::create_dir_all(&lists)
+        .with_context(|| format!("cannot create {}", lists.display()))?;
+    for (name, lines) in [
+        (EXCLUDE_DOMAINS, &exclusions.domains),
+        (EXCLUDE_IPS, &exclusions.ips),
+    ] {
+        std::fs::write(lists.join(name), lines.join("\n") + "\n")
+            .with_context(|| format!("cannot write {}", lists.join(name).display()))?;
+    }
+    // The ports live in the settings file: one save at a time, like a whole settings save.
+    let _saving = state.saving();
+    let mut settings = state.settings();
+    if settings.excluded_ports != exclusions.ports {
+        settings.excluded_ports = exclusions.ports.clone();
+        crate::settings::save(&state.paths.settings(), &settings)?;
+        state.set_settings(settings);
+    }
+    drop(_saving);
+    refresh_queue(app, &engine)?;
+    changed(app);
+    Ok(())
+}
+
+/// The active strategy's nftables queue, rewritten with the excluded ports in force, and the
+/// running service restarted into it — the lists the engine re-read at the same start. No active
+/// strategy: the next «Применить» bakes the settings in.
+fn refresh_queue(app: &AppHandle, engine: &zapret2::Engine) -> anyhow::Result<()> {
+    let state = state(app);
+    let Some(short) = zapret::service::strategy()
+        .and_then(|name| zapret2::strip_prefix(&name).map(str::to_owned))
+    else {
+        return Ok(());
+    };
+    let excluded = state.settings().excluded_ports.join(", ");
+    state.change(|| {
+        if engine.is_nfqws() {
+            let strategy = zapret2::strategies::find(engine.root(), &short)?;
+            let tail =
+                zapret2::strategies::tail(engine, &strategy.text, state.settings().game_filter)?;
+            let (_, tcp, udp) = zapret2::nft::translate(&tail);
+            zapret2::nft::write_config(&tcp, &udp, &excluded)?;
+        }
+        // Domain and IP lists are read at start; the nftables file is applied by ExecStartPre.
+        zapret::service::restart_if_running(zapret::service::SERVICE2)
+    })
 }
 
 #[cfg(test)]

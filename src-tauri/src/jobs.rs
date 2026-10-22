@@ -39,6 +39,7 @@ pub fn start_tests(app: &AppHandle, request: Request) -> anyhow::Result<()> {
             // The whole run is one turn of the queue: nothing else changes zapret meanwhile.
             let _turn = state.turn();
             let socks5 = state.socks5();
+            let game_filter = state.settings().game_filter;
             // `run` puts zapret back before it passes a panic on: here the run only has to end.
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 tester::run::run(
@@ -46,6 +47,7 @@ pub fn start_tests(app: &AppHandle, request: Request) -> anyhow::Result<()> {
                     &state.paths.data(),
                     &request,
                     socks5.as_deref(),
+                    game_filter,
                     state.cancel_flag(),
                     &|progress| on_progress(&handle, progress),
                 )

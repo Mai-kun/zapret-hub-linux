@@ -34,6 +34,12 @@ pub struct Settings {
     pub cli_enabled: bool,
     /// Routing through the SOCKS5 proxy (router spec 3); only `set_router_enabled` writes it.
     pub router_enabled: bool,
+    /// The game filter's port placeholder `%GameFilter*`: the whole unprivileged range when on
+    /// (DbD's matchmaking, AWS GameLift), `12` when off.
+    pub game_filter: bool,
+    /// The exclusions card's ports (`51413`, `6881-6889`): traffic on them leaves the nfqueue;
+    /// the nftables queue is baked with them at every apply (zapret2 spec 5.1).
+    pub excluded_ports: Vec<String>,
 }
 
 impl Default for Settings {
@@ -47,6 +53,8 @@ impl Default for Settings {
             wizard_done: false,
             cli_enabled: false,
             router_enabled: false,
+            game_filter: true,
+            excluded_ports: Vec::new(),
         }
     }
 }
@@ -129,6 +137,7 @@ mod tests {
             "off until the user turns it on"
         );
         assert!(!Settings::default().router_enabled);
+        assert!(Settings::default().game_filter, "DbD matches without it");
     }
 
     #[test]
@@ -169,6 +178,8 @@ mod tests {
             wizard_done: true,
             cli_enabled: true,
             router_enabled: true,
+            game_filter: true,
+            excluded_ports: vec!["51413".into()],
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);

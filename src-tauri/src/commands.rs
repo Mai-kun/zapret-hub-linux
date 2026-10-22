@@ -18,7 +18,9 @@ use zapret::release::{Downloaded, Engine};
 use zapret::service::QuickCheck;
 
 use crate::actions::{self, state as app};
-use crate::dto::{Candidates, Detected, DownloadProgress, FolderKind, LiveRun, Notice, Overview};
+use crate::dto::{
+    Candidates, Detected, DownloadProgress, Exclusions, FolderKind, LiveRun, Notice, Overview,
+};
 use crate::settings::Settings;
 use crate::state::AppState;
 use crate::{routing, texts, window};
@@ -53,7 +55,14 @@ pub fn app_version() -> String {
 #[tauri::command]
 #[specta::specta]
 pub fn get_settings(state: State<'_, AppState>) -> Settings {
-    state.settings()
+    let mut settings = state.settings();
+    // The checkbox is honest: the user may have removed the entry in the system's settings, so
+    // only the file on the disk makes it checked (the flag is not corrected the other way: an
+    // entry made by hand stays the user's own business).
+    if settings.autostart && let Ok(exe) = std::env::current_exe() {
+        settings.autostart = crate::autostart::is_enabled(&exe);
+    }
+    settings
 }
 
 #[tauri::command]
@@ -131,6 +140,7 @@ pub async fn list_strategies(handle: AppHandle) -> Answer<Vec<StrategyRow>> {
             state.engine2().ok().flatten().as_ref(),
             &state.paths.data(),
             active.as_deref(),
+            state.settings().game_filter,
         )
     })
     .await
@@ -148,6 +158,7 @@ pub async fn get_strategy(handle: AppHandle, name: String) -> Answer<StrategyDet
             &state.paths.data(),
             active.as_deref(),
             &name,
+            state.settings().game_filter,
         )
     })
     .await
@@ -198,7 +209,7 @@ pub async fn validate_zapret2(handle: AppHandle, text: String) -> Answer<()> {
         let state = app(&handle);
         let engine = state.engine2_required()?;
         state.change(|| {
-            let tail = zapret2::strategies::tail(&engine, &text)?;
+            let tail = zapret2::strategies::tail(&engine, &text, state.settings().game_filter)?;
             zapret2::service::validate(&engine, &tail)
         })
     })
@@ -399,6 +410,34 @@ pub async fn stop_service(handle: AppHandle) -> Answer<()> {
 
 #[tauri::command]
 #[specta::specta]
+pub async fn start_service(handle: AppHandle) -> Answer<()> {
+    blocking(move || {
+        let done = routing::paused(&handle, || {
+            let (name, _) = zapret::service::active();
+            zapret::service::start(name)
+        });
+        actions::changed(&handle);
+        done
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn restart_service(handle: AppHandle) -> Answer<()> {
+    blocking(move || {
+        let done = routing::paused(&handle, || {
+            let (name, _) = zapret::service::active();
+            zapret::service::restart(name)
+        });
+        actions::changed(&handle);
+        done
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn nft_rules() -> Answer<String> {
     blocking(|| Ok(zapret2::nft::rules())).await
 }
@@ -407,6 +446,25 @@ pub async fn nft_rules() -> Answer<String> {
 #[specta::specta]
 pub async fn service_logs() -> Answer<String> {
     blocking(|| Ok(zapret::service::logs())).await
+}
+
+/// The exclusions card's contents: the exclude lists of zapret2 and the settings' ports.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_exclusions(handle: AppHandle) -> Answer<Exclusions> {
+    blocking(move || {
+        let state = app(&handle);
+        let engine = state.engine2_required()?;
+        Ok(actions::read_exclusions(&engine, &state.settings()))
+    })
+    .await
+}
+
+/// The lists, the settings' ports, then the queue rewritten and the service restarted into it.
+#[tauri::command]
+#[specta::specta]
+pub async fn save_exclusions(handle: AppHandle, exclusions: Exclusions) -> Answer<()> {
+    blocking(move || actions::save_exclusions(&handle, exclusions)).await
 }
 
 #[tauri::command]
