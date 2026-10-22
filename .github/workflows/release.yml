@@ -23,8 +23,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - run: cargo test --workspace --exclude zapret-hub
-      - run: ./tools/package.ps1
+      - name: Build and pack
         shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The first `version = "..."` line of the root Cargo.toml is [workspace.package]'s.
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"$' | Select-Object -First 1).Matches[0].Groups[1].Value
+          npm run tauri build
+          if ($LASTEXITCODE -ne 0) { throw "npm run tauri build exited with $LASTEXITCODE" }
+          cargo build --release -p cli
+          if ($LASTEXITCODE -ne 0) { throw "cargo build exited with $LASTEXITCODE" }
+          # Only the zip is the output: the app keeps its settings next to its exe, so the zip is
+          # staged in a folder of its own.
+          $zip = "dist/zapret-hub-$version.zip"
+          $stage = "dist/.stage-$version"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item target/release/zapret-hub.exe, target/release/zapret-hub-cli.exe, README.md, docs/cli.md -Destination $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip
+          Remove-Item -Recurse -Force $stage
       - uses: actions/upload-artifact@v4
         if: github.ref_type != 'tag'
         with:

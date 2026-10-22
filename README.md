@@ -330,9 +330,7 @@ npm run tauri build
 ```
 
 Готовый exe — `target\release\zapret-hub.exe`. CLI — отдельный пакет: `cargo build --release -p cli` собирает
-`target\release\zapret-hub-cli.exe`.
-`powershell -NoProfile -ExecutionPolicy Bypass -File tools\package.ps1` собирает оба exe и кладёт в
-`dist\zapret-hub-<версия>.zip` вместе с README и `cli.md`. `npm run tauri dev` запускается из терминала с правами
+`target\release\zapret-hub-cli.exe`. `npm run tauri dev` запускается из терминала с правами
 администратора; сборка, тесты, `npm run check` и `zapret-hub-cli` — из обычного.
 
 Выпуск: поднять версию в `Cargo.toml` и `package.json`, раздел версии в `CHANGELOG.md`, затем тег `v<версия>`
