@@ -70,7 +70,6 @@ pub fn score_standard(targets: &[TargetResult]) -> Score {
     score.ping_median_ms = median(&mut pings);
     score.discord = profile(targets, &DISCORD);
     score.youtube = profile(targets, &YOUTUBE);
-    score.dbd = profile(targets, &DBD);
     score
 }
 
@@ -123,7 +122,7 @@ pub fn sort(suite: Suite, results: &mut [StrategyResult]) {
             r.launch_error.is_some(),
             first,
             second,
-            zapret::strategies::natural_key(&format!("{}.bat", r.name)),
+            zapret::natural_key(&format!("{}.bat", r.name)),
         )
     });
 }
@@ -166,7 +165,6 @@ pub fn aggregate(mut passes: Vec<StrategyResult>) -> StrategyResult {
         likely_blocked: sum(|s| s.likely_blocked),
         discord: profile(|s| &s.discord),
         youtube: profile(|s| &s.youtube),
-        dbd: profile(|s| &s.dbd),
     };
     let launch_error = passes.iter().enumerate().find_map(|(i, p)| {
         p.launch_error

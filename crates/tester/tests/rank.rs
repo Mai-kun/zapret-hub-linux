@@ -163,7 +163,6 @@ fn extra_profile_targets_show_but_do_not_count() {
             median_ms: Some(50)
         }
     );
-    assert_eq!((score.dbd.ok, score.dbd.total), (0, 3));
     assert_eq!(score.youtube.total, 0);
 }
 
@@ -252,7 +251,6 @@ fn report_reads_like_test_zapret_ps1() {
     let run = TestRun {
         id: "2026-10-10_05-03-34".into(),
         suite: Suite::Standard,
-        flowseal_version: Some("1.10.3".into()),
         zapret2_version: None,
         canceled: false,
         restore_error: None,
