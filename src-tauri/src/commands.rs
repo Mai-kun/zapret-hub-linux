@@ -18,6 +18,7 @@ use zapret::release::{Downloaded, Engine};
 use zapret::service::QuickCheck;
 
 use crate::actions::{self, state as app};
+use crate::diag;
 use crate::dto::{
     Candidates, Detected, DownloadProgress, Exclusions, FolderKind, LiveRun, Notice, Overview,
 };
@@ -472,6 +473,21 @@ pub async fn save_exclusions(handle: AppHandle, exclusions: Exclusions) -> Answe
 pub async fn flush_dns() -> Answer<()> {
     blocking(zapret::hosts::flush_dns).await
 }
+
+/// `doctor`: every subsystem at once, with what to fix.
+#[tauri::command]
+#[specta::specta]
+pub fn doctor(handle: AppHandle) -> Answer<diag::DoctorReport> {
+    Ok(diag::doctor(&handle))
+}
+
+/// `probe` of one domain or URL: DNS, the lists, the routing rule, HTTP/TLS and a ping.
+#[tauri::command]
+#[specta::specta]
+pub fn probe(handle: AppHandle, target: String) -> Answer<diag::ProbeResult> {
+    Ok(diag::probe(&handle, &target))
+}
+
 /// The TG WS Proxy card's contents: the binary on the disk, systemd and the journal in one go.
 #[tauri::command]
 #[specta::specta]
@@ -509,7 +525,6 @@ pub async fn save_tg_ws_config(
 pub async fn open_tg_proxy(handle: AppHandle) -> Answer<()> {
     blocking(move || crate::tgws::open(&actions::state(&handle).settings())).await
 }
-
 
 #[tauri::command]
 #[specta::specta]

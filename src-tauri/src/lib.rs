@@ -4,6 +4,7 @@ mod actions;
 mod autostart;
 mod cli;
 mod commands;
+mod diag;
 mod dto;
 mod jobs;
 mod journal;
@@ -98,6 +99,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::delete_route,
             commands::add_route_preset,
             commands::route_flows,
+            commands::doctor,
+            commands::probe,
             commands::validate_route,
             commands::import_route_lines
         ])
