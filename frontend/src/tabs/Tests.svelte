@@ -16,8 +16,12 @@
   let showGames = $state(false);
   let runs = $state<RunSummary[]>([]);
   let shown = $state<TestRun | null>(null);
+  let showAllHistory = $state(false);
   // The selection is set once; later reloads keep what the user chose.
   let picked = false;
+
+  const HISTORY_LIMIT = 10;
+  const visibleRuns = $derived(showAllHistory ? runs : runs.slice(0, HISTORY_LIMIT));
 
   const usable = (list: StrategyRow[]) => list.filter((row) => row.error === null).map((row) => row.name);
   // Ticks or clears every strategy in `list`; the ticks outside it stay.
@@ -165,7 +169,7 @@
   {#if runs.length === 0}<p class="muted">{S.tests.noRuns}</p>{/if}
   <table>
     <tbody>
-      {#each runs as summary (summary.id)}
+      {#each visibleRuns as summary (summary.id)}
         <tr class:selected={shown?.id === summary.id}>
           <td><button class="link" onclick={() => openRun(summary.id)}>{runDate(summary.id)}</button></td>
           <td>{suiteName(summary.suite)}{#if summary.canceled}{" · "}{S.tests.canceled}{/if}</td>
@@ -176,6 +180,13 @@
       {/each}
     </tbody>
   </table>
+  {#if runs.length > HISTORY_LIMIT}
+    <div class="buttons">
+      <button onclick={() => (showAllHistory = !showAllHistory)}>
+        {showAllHistory ? S.tests.collapseAll(HISTORY_LIMIT) : S.tests.showAll(runs.length)}
+      </button>
+    </div>
+  {/if}
 </section>
 
 {#snippet score(kind: Suite, value: Score)}
