@@ -195,7 +195,7 @@ fn parse_port(s: &str) -> Option<(u16, u16)> {
 }
 
 /// `a.b.c.d` or `a.b.c.d/n` as an inclusive range; host bits are zeroed.
-fn parse_net(s: &str) -> Option<(u32, u32)> {
+pub fn parse_net(s: &str) -> Option<(u32, u32)> {
     let (ip, bits) = match s.split_once('/') {
         Some((ip, n)) => (ip, n.parse::<u32>().ok().filter(|n| *n <= 32)?),
         None => (s, 32),
@@ -726,6 +726,20 @@ impl Table {
         self.rules
             .iter()
             .any(|r| r.domains.iter().any(|d| covers(d, name)))
+    }
+
+    /// Name of the first rule (file order) whose domains cover `name` (lowercase) or whose
+    /// subnets hold `ip`.
+    pub fn rule_for(&self, name: &str, ip: Option<Ipv4Addr>) -> Option<&str> {
+        self.rules
+            .iter()
+            .find(|r| {
+                r.domains.iter().any(|d| covers(d, name))
+                    || ip.is_some_and(|ip| {
+                        r.ranges.iter().any(|&(a, b)| (a..=b).contains(&u32::from(ip)))
+                    })
+            })
+            .map(|r| r.name.as_str())
     }
 
     /// Adds each resolved IP to the rules whose domains cover its name.
