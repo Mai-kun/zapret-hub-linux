@@ -5,6 +5,26 @@ use tester::model::StrategyResult;
 use tester::run::{Progress, Request};
 use zapret::service::{QuickCheck, SvcState};
 
+/// The tg-ws-proxy service: what the overview's and the tools' cards show, read in one go.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct TgWsStatus {
+    /// The static binary is on the disk.
+    pub installed: bool,
+    /// The tag from the release `version.txt` keeps next to the binary.
+    pub version: Option<String>,
+    /// `systemctl --user is-active` answers «active».
+    pub running: bool,
+    pub port: u16,
+    /// The 32 hex characters of the MTProto secret (or the empty default before a save).
+    pub secret: String,
+    /// The extra CLI flags after `--secret`.
+    pub args: String,
+    /// `tg://proxy?server=127.0.0.1&port=<port>&secret=dd<secret>`.
+    pub tg_url: String,
+    /// The last lines of the unit's journal.
+    pub logs: String,
+}
+
 /// The «Обзор» tab, read in one go.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, specta::Type)]
 pub struct Overview {
