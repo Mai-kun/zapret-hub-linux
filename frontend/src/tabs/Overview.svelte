@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { commands, type ProxyStatus, type RunSummary } from "$lib/ipc/bindings";
+  import { commands, type ProxyStatus, type RunSummary, type TgWsStatus } from "$lib/ipc/bindings";
+  import CopyButton from "../components/CopyButton.svelte";
   import { call } from "$lib/api";
   import { app, change, refreshOverview } from "$lib/app.svelte";
   import { latestPerSuite, ms, runDate } from "$lib/format";
@@ -9,6 +10,8 @@
   let proxy = $state<ProxyStatus | null>(null);
   let proxyBusy = $state(false);
   let runs = $state<RunSummary[]>([]);
+  let tgws = $state<TgWsStatus | null>(null);
+  let tgwsBusy = $state(false);
 
   // The newest run of each kind: a DPI run does not hide the last standard one.
   const latest = $derived(latestPerSuite(runs));
@@ -19,6 +22,30 @@
     void app.overview?.last_run?.id;
     void call(S.failed.runs, commands.listRuns()).then((list) => (runs = list ?? []));
   });
+
+  $effect(() => {
+    void app.revision;
+    void call(S.failed.tgWsStatus, commands.tgWsStatus()).then((status) => (tgws = status ?? null));
+  });
+
+  async function installTgws(): Promise<void> {
+    tgwsBusy = true;
+    try {
+      tgws = (await change(S.failed.tgWsInstall, () => commands.installTgWs())) ?? tgws;
+    } finally {
+      tgwsBusy = false;
+    }
+  }
+
+  async function toggleTgws(): Promise<void> {
+    if (!tgws) return;
+    tgwsBusy = true;
+    try {
+      tgws = (await change(S.failed.tgWsEnabled, () => commands.setTgWsEnabled(!tgws?.running))) ?? tgws;
+    } finally {
+      tgwsBusy = false;
+    }
+  }
 
   async function checkProxy(): Promise<void> {
     const addr = app.settings?.socks5;
@@ -173,6 +200,23 @@
               ? S.overview.errors(score.total - score.ok, score.total, ms(score.median_ms))
               : S.strategies.dpiScore(score.likely_blocked, score.fail)}
           </p>
+          <div class="quick-items">
+            {#if run.suite === "Standard"}
+              <span class="check-pill {score.discord.ok === score.discord.total ? "ok" : "warn"}">
+                {S.results.discord}: {score.discord.ok}/{score.discord.total}{" · "}{ms(score.discord.median_ms)}
+              </span>
+              <span class="check-pill {score.youtube.ok === score.youtube.total ? "ok" : "warn"}">
+                {S.results.youtube}: {score.youtube.ok}/{score.youtube.total}{" · "}{ms(score.youtube.median_ms)}
+              </span>
+              <span class="check-pill {score.ping_ok === score.ping_total ? "ok" : "warn"}">
+                {S.results.ping}: {score.ping_ok}/{score.ping_total}{" · "}{ms(score.ping_median_ms)}
+              </span>
+            {:else}
+              <span class="check-pill {score.ok === score.total ? "ok" : "warn"}">
+                {S.overview.scoreOk(score.ok, score.total)}
+              </span>
+            {/if}
+          </div>
         {/if}
         <p class="muted">{runDate(run.id)}</p>
       {:else}
@@ -190,13 +234,32 @@
       </div>
     </section>
 
-    <!-- TG WS Proxy: задел на будущее -->
+    <!-- TG WS Proxy -->
     <section class="card">
       <div class="card-head">
         <h2>{S.overview.tgProxy}</h2>
-        <span class="badge">{S.overview.tgProxyStatus}</span>
+        <span class="badge" class:ok={tgws?.running}>
+          {#if !tgws?.installed}{S.overview.tgProxyAbsent}
+          {:else if tgws.running}{S.overview.tgProxyOn(tgws.port)}
+          {:else}{S.overview.tgProxyOff}{/if}
+        </span>
       </div>
       <p class="muted">{S.overview.tgProxyDesc}</p>
+      <div class="buttons">
+        {#if !tgws?.installed}
+          <button class="primary" disabled={tgwsBusy} onclick={installTgws}>
+            {tgwsBusy ? S.common.loading : S.overview.tgProxyInstall}
+          </button>
+        {:else}
+          <button class="primary" disabled={tgwsBusy} onclick={toggleTgws}>
+            {tgws.running ? S.overview.tgProxyDisable : S.overview.tgProxyEnable}
+          </button>
+          <button disabled={tgwsBusy} onclick={() => change(S.failed.tgWsOpen, () => commands.openTgProxy())}>
+            {S.overview.tgProxyConnect}
+          </button>
+          <CopyButton text={() => tgws?.tg_url ?? ""} />
+        {/if}
+      </div>
     </section>
 
     <!-- Прокси SOCKS5 -->
