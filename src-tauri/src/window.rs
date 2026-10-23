@@ -1,5 +1,5 @@
-//! The main window: made when needed, destroyed by its close button, while the app stays in the
-//! tray (spec 4.2).
+//! The main window: made when needed, hidden by its close button (only «Выход» in the tray menu
+//! ends the app, spec 4.2).
 
 use tauri::{AppHandle, Manager as _, WebviewUrl, WebviewWindowBuilder};
 

@@ -152,6 +152,14 @@ pub fn run() -> anyhow::Result<()> {
         }))
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        // The cross hides the window instead of destroying it: the last window gone makes the GTK
+        // main loop quit and kills the tray. Only the tray's «Выход» may end the app.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
