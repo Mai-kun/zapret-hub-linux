@@ -48,7 +48,7 @@ const POLL: Duration = Duration::from_secs(2);
 )]
 struct Cli {
     /// Confirm what the window asks to confirm: zapret2 delete, discord clear-cache, service
-    /// remove, routes remove.
+    /// remove, routes remove, exclusions reset.
     #[arg(long, global = true)]
     yes: bool,
     #[command(subcommand)]
@@ -100,6 +100,21 @@ enum Command {
     /// The routing rules of data\routes.toml.
     #[command(subcommand)]
     Routes(RoutesCommand),
+    /// The exclusion lists of zapret2 and the ports that leave the nfqueue.
+    #[command(subcommand)]
+    Exclusions(ExclusionsCommand),
+    /// The TG WS Proxy service (Telegram WebSocket).
+    #[command(subcommand)]
+    TgWs(TgWsCommand),
+    /// Active nftables rules.
+    Nft,
+    /// The system's DNS cache flushed.
+    DnsFlush,
+    /// Whole-state self-diagnostics: every subsystem, problems in one report.
+    Doctor,
+    /// A domain (`discord.com`) or URL (`https://gateway.discord.gg`): DNS, the lists it is in,
+    /// the rule that takes it and its live checks.
+    Probe { target: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -249,6 +264,9 @@ enum RoutesCommand {
 enum PresetArg {
     DiscordVoice,
     Discord,
+    Cloudflare,
+    Telegram,
+    Twitch,
     Dbd,
 }
 
@@ -257,6 +275,9 @@ impl From<PresetArg> for Preset {
         match preset {
             PresetArg::DiscordVoice => Preset::DiscordVoice,
             PresetArg::Discord => Preset::Discord,
+            PresetArg::Cloudflare => Preset::Cloudflare,
+            PresetArg::Telegram => Preset::Telegram,
+            PresetArg::Twitch => Preset::Twitch,
             PresetArg::Dbd => Preset::Dbd,
         }
     }
@@ -266,6 +287,60 @@ impl From<PresetArg> for Preset {
 enum ServiceCommand {
     /// Remove the zapret or zapret2 service and WinDivert (needs --yes).
     Remove,
+    /// The service started.
+    Start,
+    /// The service stopped.
+    Stop,
+    /// The service restarted.
+    Restart,
+    /// The last lines of the journal.
+    Logs,
+}
+
+#[derive(Debug, Subcommand)]
+enum ExclusionsCommand {
+    /// The two exclude lists of zapret2 and the nftables-excluded ports.
+    Show,
+    /// One entry added to `domains` (list-exclude-user.txt), `ips` (ipset-exclude-user.txt) or
+    /// `ports` (the ports that leave the nfqueue).
+    Add { list: ExclusionList, value: String },
+    /// One entry removed, wherever it was: equal or, for domains, only in given case.
+    Remove { list: ExclusionList, value: String },
+    /// Back to the default exclusions: the user lists empty (an empty file reads the defaults)
+    /// and no excluded ports (needs --yes).
+    Reset,
+}
+
+/// The lists the exclusions card edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ExclusionList {
+    Domains,
+    Ips,
+    Ports,
+}
+
+#[derive(Debug, Subcommand)]
+enum TgWsCommand {
+    /// The service's status: the disk, systemd and the settings in one go.
+    Status,
+    /// The latest `tg-ws-proxy-rs` release unpacked and the service as it was.
+    Install,
+    /// The proxy service on (and enabled in `systemd --user`).
+    On,
+    /// The proxy service off.
+    Off,
+    /// The port, the secret or the extra flags changed; only the given ones change.
+    Config {
+        /// The MTProto port to listen on.
+        #[arg(long)]
+        port: Option<u16>,
+        /// 32 hex characters of the MTProto secret.
+        #[arg(long)]
+        secret: Option<String>,
+        /// Extra CLI flags after `--secret`, e.g. `--fronting-domain example.com`.
+        #[arg(long)]
+        args: Option<String>,
+    },
 }
 
 /// The keys of zapret-hub.toml the CLI may change (spec 7.2). Not `zapret2_dir`:
@@ -279,6 +354,9 @@ enum Key {
     StartMinimized,
     Theme,
     CliEnabled,
+    /// The game filter's port placeholder: the whole unprivileged port range when on, `12` when
+    /// off.
+    GameFilter,
 }
 
 /// What goes to stdout on success.
@@ -402,6 +480,7 @@ fn needs_yes(command: &Command) -> bool {
             | Command::Discord(DiscordCommand::ClearCache)
             | Command::Service(ServiceCommand::Remove)
             | Command::Routes(RoutesCommand::Remove { .. })
+            | Command::Exclusions(ExclusionsCommand::Reset)
     )
 }
 
@@ -536,6 +615,61 @@ fn run(args: Cli, call: Call, note: Note) -> Result<Done, Fail> {
             preset: preset.into(),
         },
         Command::Routes(RoutesCommand::Flows { all }) => Request::RouteFlows { all },
+        Command::Exclusions(ExclusionsCommand::Show) => Request::GetExclusions,
+        Command::Exclusions(ExclusionsCommand::Add { list, value }) => {
+            let value = exclusion_value(list, &value)?;
+            let mut exclusions = call(Request::GetExclusions)?;
+            add_exclusion(&mut exclusions, list, &value)?;
+            Request::SaveExclusions { exclusions }
+        }
+        Command::Exclusions(ExclusionsCommand::Remove { list, value }) => {
+            let value = exclusion_value(list, &value)?;
+            let mut exclusions = call(Request::GetExclusions)?;
+            remove_exclusion(&mut exclusions, list, &value)?;
+            Request::SaveExclusions { exclusions }
+        }
+        Command::Exclusions(ExclusionsCommand::Reset) => {
+            let mut exclusions = call(Request::GetExclusions)?;
+            let object = exclusions.as_object_mut().ok_or_else(|| {
+                Fail::new(UNAVAILABLE, "Zapret Hub sent exclusions that are not an object")
+            })?;
+            let empty = || Value::Array(Vec::new());
+            for list in ["domains", "ips", "ports"] {
+                object.insert(list.to_owned(), empty());
+            }
+            Request::SaveExclusions { exclusions }
+        }
+        Command::TgWs(TgWsCommand::Status) => Request::TgWsStatus,
+        Command::TgWs(TgWsCommand::Install) => Request::InstallTgWs,
+        Command::TgWs(TgWsCommand::On) => Request::SetTgWsEnabled { enabled: true },
+        Command::TgWs(TgWsCommand::Off) => Request::SetTgWsEnabled { enabled: false },
+        Command::TgWs(TgWsCommand::Config {
+            port,
+            secret,
+            args,
+        }) => {
+            if port.is_none() && secret.is_none() && args.is_none() {
+                return Err(Fail::new(
+                    USAGE,
+                    "nothing to change: give --port, --secret or --args",
+                ));
+            }
+            let status = call(Request::TgWsStatus)?;
+            let take = |key: &str| status[key].as_str().unwrap_or_default().to_owned();
+            Request::SaveTgWsConfig {
+                port: port.unwrap_or(status["port"].as_u64().unwrap_or_default() as u16),
+                secret: secret.unwrap_or_else(|| take("secret")),
+                args: args.unwrap_or_else(|| take("args")),
+            }
+        }
+        Command::Service(ServiceCommand::Start) => Request::StartService,
+        Command::Service(ServiceCommand::Stop) => Request::StopService,
+        Command::Service(ServiceCommand::Restart) => Request::RestartService,
+        Command::Service(ServiceCommand::Logs) => Request::ServiceLogs,
+        Command::Nft => Request::NftRules,
+        Command::DnsFlush => Request::FlushDns,
+        Command::Doctor => Request::Doctor,
+        Command::Probe { target } => Request::ProbeTarget { target },
     };
     // A command without a result answers `null`: an explicit ok then.
     call(request).map(|data| {
@@ -554,6 +688,115 @@ fn key_name(key: Key) -> String {
         .to_owned()
 }
 
+fn list_name(list: ExclusionList) -> String {
+    list.to_possible_value()
+        .expect("no list is skipped")
+        .get_name()
+        .to_owned()
+}
+
+/// A domain: LDH labels with at least two of them.
+fn is_domain(value: &str) -> bool {
+    let value = value.strip_suffix('.').unwrap_or(value);
+    let labels: Vec<&str> = value.split('.').collect();
+    labels.len() >= 2
+        && labels.iter().all(|l| {
+            (1..=63).contains(&l.len())
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+/// An IPv4 address or a subnet `a.b.c.d/n`, as any line of `ipset-exclude-user.txt` reads.
+fn is_ip_entry(value: &str) -> bool {
+    let (ip, bits) = match value.split_once('/') {
+        Some((ip, bits)) => (ip, bits),
+        None => return value.parse::<std::net::Ipv4Addr>().is_ok(),
+    };
+    let bits: u32 = match bits.parse() {
+        Ok(bits) => bits,
+        Err(_) => return false,
+    };
+    ip.parse::<std::net::Ipv4Addr>().is_ok() && bits <= 32
+}
+
+/// A port (`51413`) or a port range (`6881-6889`), as the exclusions card writes them.
+fn is_port_entry(value: &str) -> bool {
+    let (a, b) = match value.split_once('-') {
+        Some((a, b)) => (a, b),
+        None => return value.parse::<u16>().is_ok_and(|port| port >= 1),
+    };
+    matches!((a.parse::<u16>(), b.parse::<u16>()), (Ok(a), Ok(b)) if a >= 1 && a <= b)
+}
+
+/// An entry of one of the lists, checked before anything is sent (spec 7.2).
+fn exclusion_value(list: ExclusionList, value: &str) -> Result<String, Fail> {
+    let name = list_name(list);
+    let bad = |what: &str| Fail::new(USAGE, format!("{name} takes {what}, not {value:?}"));
+    let value = value.trim();
+    if value.is_empty()
+        || value.chars().any(char::is_control)
+        || value.contains('#')
+        || value != value.trim()
+    {
+        return Err(bad("an entry of one line"));
+    }
+    let ok = match list {
+        ExclusionList::Domains => is_domain(value),
+        ExclusionList::Ips => is_ip_entry(value),
+        ExclusionList::Ports => is_port_entry(value),
+    };
+    if !ok {
+        return Err(match list {
+            ExclusionList::Domains => bad("a domain"),
+            ExclusionList::Ips => bad("an IPv4 address or subnet (a.b.c.d/n)"),
+            ExclusionList::Ports => bad("a port or a port range (6881-6889)"),
+        });
+    }
+    Ok(value.to_owned())
+}
+
+/// The lists arrive as `{ "domains": […], "ips": […], "ports": […] }`; `&str` indexing on a
+/// non-object `Value` would panic, so the shape is trusted only through `as_array`.
+fn entries(exclusions: &Value, name: &str) -> Result<Vec<String>, Fail> {
+    exclusions[name]
+        .as_array()
+        .map(|taken| {
+            taken
+                .iter()
+                .filter_map(|taken| taken.as_str().map(str::to_owned))
+                .collect()
+        })
+        .ok_or_else(|| Fail::new(UNAVAILABLE, "Zapret Hub sent exclusions of another shape"))
+}
+
+fn add_exclusion(exclusions: &mut Value, list: ExclusionList, value: &str) -> Result<(), Fail> {
+    let name = list_name(list);
+    let mut taken: Vec<String> = entries(exclusions, &name)?;
+    if taken.iter().any(|taken| taken.eq_ignore_ascii_case(value)) {
+        return Err(Fail::new(FAILED, format!("{value} is in {name} already")));
+    }
+    taken.push(value.to_owned());
+    exclusions[name.as_str()] = Value::Array(taken.into_iter().map(Value::from).collect());
+    Ok(())
+}
+
+fn remove_exclusion(exclusions: &mut Value, list: ExclusionList, value: &str) -> Result<(), Fail> {
+    let name = list_name(list);
+    let taken: Vec<String> = entries(exclusions, &name)?;
+    let left: Vec<String> = taken
+        .iter()
+        .filter(|taken| !taken.eq_ignore_ascii_case(value))
+        .cloned()
+        .collect();
+    if left.len() == taken.len() {
+        return Err(Fail::new(FAILED, format!("{value} is not in {name}")));
+    }
+    exclusions[name.as_str()] = Value::Array(left.into_iter().map(Value::from).collect());
+    Ok(())
+}
+
 /// A value for `settings set`, checked before anything is sent (spec 7.2).
 fn setting(key: Key, value: &str) -> Result<Value, Fail> {
     let bad = |what: &str| {
@@ -565,7 +808,7 @@ fn setting(key: Key, value: &str) -> Result<Value, Fail> {
     match key {
         Key::Socks5 if value.trim().is_empty() => Ok(Value::Null),
         Key::Socks5 => Ok(value.into()),
-        Key::Autostart | Key::StartMinimized | Key::CliEnabled => value
+        Key::Autostart | Key::StartMinimized | Key::CliEnabled | Key::GameFilter => value
             .parse::<bool>()
             .map(Value::Bool)
             .map_err(|_| bad("true or false")),
@@ -1005,11 +1248,132 @@ mod tests {
                 Request::ClearDiscordCache,
             ),
             (&["service", "remove", "--yes"], Request::RemoveService),
+            (&["service", "start"], Request::StartService),
+            (&["service", "stop"], Request::StopService),
+            (&["service", "restart"], Request::RestartService),
+            (&["service", "logs"], Request::ServiceLogs),
+            (&["nft"], Request::NftRules),
+            (&["dns-flush"], Request::FlushDns),
+            (&["doctor"], Request::Doctor),
+            (
+                &["probe", "https://discord.com"],
+                Request::ProbeTarget {
+                    target: "https://discord.com".into(),
+                },
+            ),
+            (&["exclusions", "show"], Request::GetExclusions),
+            (&["tg-ws", "status"], Request::TgWsStatus),
+            (&["tg-ws", "install"], Request::InstallTgWs),
+            (&["tg-ws", "on"], Request::SetTgWsEnabled { enabled: true }),
+            (&["tg-ws", "off"], Request::SetTgWsEnabled { enabled: false }),
         ];
         for (args, expected) in table {
             let (_, asked) = drive(args, Vec::new());
             assert_eq!(asked, [expected], "{args:?}");
         }
+    }
+
+    #[test]
+    fn exclusions_edit_read_change_and_write_back() {
+        let held = || {
+            Ok(json!({
+                "domains": ["discord.com"],
+                "ips": ["203.0.113.0/24"],
+                "ports": ["51413"],
+            }))
+        };
+        let (_, asked) = drive(
+            &["exclusions", "add", "domains", "example.com"],
+            vec![held(), Ok(Value::Null)],
+        );
+        let [Request::GetExclusions, Request::SaveExclusions { exclusions }] = asked.as_slice()
+        else {
+            panic!("{asked:?}")
+        };
+        assert_eq!(exclusions["domains"], json!(["discord.com", "example.com"]));
+        assert_eq!(exclusions["ports"], json!(["51413"]));
+        // The app already holds it: the CLI reads the lists and then says so, saving nothing.
+        let (outcome, asked) = drive(
+            &["exclusions", "add", "ips", "203.0.113.0/24"],
+            vec![held()],
+        );
+        assert_eq!(asked, [Request::GetExclusions]);
+        assert_eq!(code(outcome), FAILED);
+        // Removal matches a domain without its case.
+        let (_, asked) = drive(
+            &["exclusions", "remove", "domains", "DISCORD.com"],
+            vec![held(), Ok(Value::Null)],
+        );
+        let [Request::GetExclusions, Request::SaveExclusions { exclusions }] = asked.as_slice()
+        else {
+            panic!("{asked:?}")
+        };
+        assert_eq!(exclusions["domains"], json!([]));
+        let (outcome, asked) = drive(
+            &["exclusions", "remove", "ips", "203.0.113.0/24"],
+            vec![held(), Ok(Value::Null)],
+        );
+        assert_eq!(code(outcome), 0);
+        let [Request::GetExclusions, Request::SaveExclusions { exclusions }] = asked.as_slice()
+        else {
+            panic!("{asked:?}")
+        };
+        assert_eq!(exclusions["ips"], json!([]));
+        // Removing anything else fails after only the read.
+        let (outcome, asked) = drive(
+            &["exclusions", "remove", "domains", "answer.com"],
+            vec![held()],
+        );
+        assert_eq!(asked, [Request::GetExclusions]);
+        assert_eq!(code(outcome), FAILED);
+        // A value that is not of its list: refused before the app is asked.
+        for (list, value) in [
+            ("domains", "one-label"),
+            ("ips", "discord.com"),
+            ("ips", "203.0.113.0/33"),
+            ("ports", "discord.com"),
+            ("ports", "0"),
+            ("ports", "0-65535"),
+            ("ports", "5000-4000"),
+        ] {
+            let (outcome, asked) = drive(&["exclusions", "add", list, value], Vec::new());
+            assert!(asked.is_empty(), "{list} {value}");
+            assert_eq!(code(outcome), USAGE, "{list} {value}");
+        }
+        // Reset empties the three lists and keeps the shape.
+        let (_, asked) = drive(
+            &["exclusions", "reset", "--yes"],
+            vec![held(), Ok(Value::Null)],
+        );
+        let [Request::GetExclusions, Request::SaveExclusions { exclusions }] = asked.as_slice()
+        else {
+            panic!("{asked:?}")
+        };
+        assert_eq!(exclusions, &json!({"domains": [], "ips": [], "ports": []}));
+    }
+
+    #[test]
+    fn tg_ws_config_changes_only_the_given_keys() {
+        let status = || {
+            Ok(json!({"port": 1443, "secret": "abcdef", "args": "--wait"}))
+        };
+        let save = |asked: &[Request]| -> (u16, String, String) {
+            let [Request::TgWsStatus, Request::SaveTgWsConfig { port, secret, args }] = asked
+            else {
+                panic!("{asked:?}")
+            };
+            (*port, secret.clone(), args.clone())
+        };
+        let (_, asked) = drive(&["tg-ws", "config", "--port", "9000"], vec![status()]);
+        assert_eq!(save(&asked), (9000, "abcdef".into(), "--wait".into()));
+        let (_, asked) = drive(&["tg-ws", "config", "--secret", "123456"], vec![status()]);
+        assert_eq!(save(&asked), (1443, "123456".into(), "--wait".into()));
+        let (_, asked) = drive(&["tg-ws", "config", "--args", ""], vec![status()]);
+        assert_eq!(save(&asked), (1443, "abcdef".into(), "".into()));
+        // Nothing to change: usage error, the app never asked.
+        let (outcome, asked) = drive(&["tg-ws", "config"], Vec::new());
+        assert!(asked.is_empty());
+        assert_eq!(code(outcome), USAGE);
     }
 
     #[test]
@@ -1019,6 +1383,7 @@ mod tests {
             &["discord", "clear-cache"],
             &["service", "remove"],
             &["routes", "remove", "v"],
+            &["exclusions", "reset"],
         ] {
             let (outcome, asked) = drive(args, Vec::new());
             assert_eq!(code(outcome), USAGE, "{args:?}");
