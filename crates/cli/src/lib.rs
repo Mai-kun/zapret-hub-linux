@@ -99,6 +99,42 @@ pub enum Request {
     RouteFlows {
         all: bool,
     },
+    /// The running service on, off, restarted, or its journal as text.
+    StartService,
+    StopService,
+    RestartService,
+    ServiceLogs,
+    /// Active nftables rules as text.
+    NftRules,
+    /// The system's DNS cache flushed.
+    FlushDns,
+    /// The exclusions card's contents: the two exclude lists and the nftables-excluded ports.
+    GetExclusions,
+    /// `exclusions` as the app's `Exclusions` JSON: the type lives in the app, which checks it.
+    SaveExclusions {
+        exclusions: Value,
+    },
+    /// The TG WS Proxy service: the disk, systemd and the settings in one go.
+    TgWsStatus,
+    /// The latest `tg-ws-proxy-rs` release unpacked, then the service back the way it was.
+    InstallTgWs,
+    SetTgWsEnabled {
+        enabled: bool,
+    },
+    /// Only the fields the window's `save_tg_ws_config` has; the other settings stay.
+    SaveTgWsConfig {
+        port: u16,
+        secret: String,
+        args: String,
+    },
+    /// The whole state of every subsystem, problems included, in one answer.
+    Doctor,
+    /// A domain (`discord.com`) or URL (`https://gateway.discord.gg`): DNS, the lists, the rules
+    /// and the live checks of it.
+    #[serde(rename = "probe")]
+    ProbeTarget {
+        target: String,
+    },
 }
 
 impl Request {
@@ -309,11 +345,33 @@ mod tests {
                 preset: Preset::DiscordVoice,
             },
             Request::RouteFlows { all: true },
+            Request::StartService,
+            Request::StopService,
+            Request::RestartService,
+            Request::ServiceLogs,
+            Request::NftRules,
+            Request::FlushDns,
+            Request::GetExclusions,
+            Request::SaveExclusions {
+                exclusions: json!({ "domains": [], "ips": [], "ports": [] }),
+            },
+            Request::TgWsStatus,
+            Request::InstallTgWs,
+            Request::SetTgWsEnabled { enabled: true },
+            Request::SaveTgWsConfig {
+                port: 1443,
+                secret: "ab".repeat(16),
+                args: String::new(),
+            },
+            Request::Doctor,
+            Request::ProbeTarget {
+                target: "https://gateway.discord.gg".into(),
+            },
         ]
     }
 
     /// Window commands the CLI leaves out (spec 6).
-    const WINDOW_ONLY: [&str; 23] = [
+    const WINDOW_ONLY: [&str; 16] = [
         "detect_folders",
         "check_zapret2_folder",
         "pick_folder",
@@ -332,16 +390,8 @@ mod tests {
         // The editor checks a rule as it is typed and fills its IP list from a pasted text.
         "validate_route",
         "import_route_lines",
-        // Linux system tools and diagnostics tab
-        "stop_service",
-        "start_service",
-        "restart_service",
-        "nft_rules",
-        "service_logs",
-        "flush_dns",
-        // The exclusions card: reading and writing the lists, the queue and the service.
-        "get_exclusions",
-        "save_exclusions",
+        // `xdg-open` of the `tg://proxy` link: a command that opens a program.
+        "open_tg_proxy",
     ];
 
     /// `("cmd", { a, b })` → the argument names in `bindings.ts`, sorted.
