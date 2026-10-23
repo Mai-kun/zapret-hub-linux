@@ -54,6 +54,8 @@ pub fn operation(id: &str) -> &str {
 }
 
 pub const AUTOSTART_FAILED: &str = "Автозапуск не обновлён";
+pub const SERVICE_RAISE_FAILED: &str = "Служба обхода не поднялась при старте";
+pub const TG_WS_RAISE_FAILED: &str = "tg-ws-proxy не поднялся при старте";
 pub const HISTORY_FAILED: &str = "История тестов не прочитана";
 pub const RESTORE_AFTER_TESTS: &str = "После тестов не всё вернулось на место";
 

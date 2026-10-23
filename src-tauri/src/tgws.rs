@@ -145,7 +145,7 @@ fn systemctl(args: &[&str]) -> anyhow::Result<()> {
         .map_err(|err| err.context(format!("systemctl --user {}", args.join(" "))))
 }
 
-fn is_active() -> bool {
+pub fn is_active() -> bool {
     systemctl_quiet(&["is-active", "--quiet", UNIT]).is_ok_and(|out| out.success())
 }
 
@@ -226,7 +226,9 @@ fn stop_strays() {
     }
 }
 
-fn start(settings: &Settings) -> anyhow::Result<()> {
+/// The unit and systemd's enablement, then the service while it was not running: the bottom of
+/// `set_tg_ws_enabled` and, at the app's start, whatever else it was left off.
+pub fn start(settings: &Settings) -> anyhow::Result<()> {
     write_unit(settings)?;
     stop_strays();
     systemctl(&["enable", "--now", UNIT])

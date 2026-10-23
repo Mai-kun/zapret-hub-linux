@@ -401,7 +401,11 @@ pub async fn stop_service(handle: AppHandle) -> Answer<()> {
     blocking(move || {
         let done = routing::paused(&handle, || {
             let (name, _) = zapret::service::active();
-            zapret::service::stop(name)
+            zapret::service::stop(name)?;
+            // A stop by hand holds for boots too: the enablement is the user's switch,
+            // and a start puts it back.
+            let _ = zapret::service::disable(name);
+            Ok(())
         });
         actions::changed(&handle);
         done

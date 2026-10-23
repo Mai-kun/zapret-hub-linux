@@ -166,6 +166,7 @@ fn background_check(app: &AppHandle) {
 /// Before anything else changes zapret, an interrupted operation is put back (spec 10).
 fn startup(app: &AppHandle) {
     recover(app);
+    raise_services(app);
     let state = state(app);
     // Routing comes back as it was left (router spec 3).
     crate::routing::sync(app);
@@ -195,6 +196,40 @@ fn startup(app: &AppHandle) {
         ),
     }
     actions::changed(app);
+}
+
+/// At a start after the boot the strategy may be applied and the service enabled, yet down: an
+/// early boot found `/home` or the network not ready, and systemd's few retries are over. A
+/// service the strategy applies to and the user left enabled (a manual stop disables it) is
+/// raised here, and the first background check right after turns the tray green (spec 9.3).
+/// tg-ws-proxy comes back the same way when its flag says so.
+fn raise_services(app: &AppHandle) {
+    let state = state(app);
+    let (name, _) = zapret::service::active();
+    let down = zapret::service::strategy().is_some()
+        && zapret::service::config(name).is_some_and(|config| config.auto_start)
+        && zapret::service::state(name) != SvcState::Running;
+    if down
+        && let Err(err) = state.change(|| zapret::service::start(name))
+    {
+        actions::notice(
+            app,
+            NoticeLevel::Error,
+            texts::SERVICE_RAISE_FAILED,
+            format!("{err:#}"),
+        );
+    }
+    if state.settings().tg_ws_enabled
+        && !crate::tgws::is_active()
+        && let Err(err) = crate::tgws::start(&state.settings())
+    {
+        actions::notice(
+            app,
+            NoticeLevel::Error,
+            texts::TG_WS_RAISE_FAILED,
+            format!("{err:#}"),
+        );
+    }
 }
 
 fn recover(app: &AppHandle) {

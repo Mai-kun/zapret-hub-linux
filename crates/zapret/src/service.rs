@@ -197,17 +197,29 @@ pub fn create(name: &str, bin_path: &str, auto_start: bool) -> anyhow::Result<()
     } else {
         "# not started at boot"
     };
+    // `Restart` on failure: an early boot may find `/home` or the network not ready (spec 9.3).
     let unit = format!(
-        "[Unit]\nDescription={description}\nAfter=network.target\n\n[Service]\n{}{}ExecStart={bin_path}\n\n[Install]\n{wanted}\n",
+        "[Unit]\nDescription={description}\nAfter=network.target\n\n[Service]\n{}{}ExecStart={bin_path}\nRestart=on-failure\nRestartSec=2\n\n[Install]\n{wanted}\n",
         unit_hooks(name),
         run_as_user(name),
     );
     let path = unit_path(name);
     crate::root::write(&path, &unit)?;
     root_cmd("systemctl", &["daemon-reload"])?.check()?;
-    if auto_start {
-        let _ = root_cmd("systemctl", &["enable", name]);
-    }
+    // The remembered switch: `create` puts it where the caller asked, a user stop turns it off.
+    let _ = if auto_start { enable(name) } else { disable(name) };
+    Ok(())
+}
+
+/// `systemctl enable`: the unit starts at boot.
+pub fn enable(name: &str) -> anyhow::Result<()> {
+    root_cmd("systemctl", &["enable", name])?.check()?;
+    Ok(())
+}
+
+/// `systemctl disable`: the unit waits for a start.
+pub fn disable(name: &str) -> anyhow::Result<()> {
+    root_cmd("systemctl", &["disable", name])?.check()?;
     Ok(())
 }
 
@@ -299,6 +311,9 @@ pub fn remove() -> anyhow::Result<()> {
 
 pub fn start(name: &str) -> anyhow::Result<()> {
     if state(name) != SvcState::Running {
+        // A start is the user (or the app) asking for the service back up and at boot:
+        // it turns the enablement back on, as `stop` of the user turns it off.
+        let _ = enable(name);
         root_cmd("systemctl", &["start", name])?.check()?;
     }
     Ok(())
