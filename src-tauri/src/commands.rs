@@ -472,6 +472,44 @@ pub async fn save_exclusions(handle: AppHandle, exclusions: Exclusions) -> Answe
 pub async fn flush_dns() -> Answer<()> {
     blocking(zapret::hosts::flush_dns).await
 }
+/// The TG WS Proxy card's contents: the binary on the disk, systemd and the journal in one go.
+#[tauri::command]
+#[specta::specta]
+pub async fn tg_ws_status(handle: AppHandle) -> Answer<crate::dto::TgWsStatus> {
+    blocking(move || Ok(crate::tgws::status(&handle))).await
+}
+
+/// The latest `tg-ws-proxy-rs` release unpacked into the data folder, then the service back the
+/// way it was.
+#[tauri::command]
+#[specta::specta]
+pub async fn install_tg_ws(handle: AppHandle) -> Answer<crate::dto::TgWsStatus> {
+    blocking(move || crate::tgws::install(&handle)).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_tg_ws_enabled(handle: AppHandle, enabled: bool) -> Answer<crate::dto::TgWsStatus> {
+    blocking(move || crate::tgws::set_enabled(&handle, enabled)).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn save_tg_ws_config(
+    handle: AppHandle,
+    port: u16,
+    secret: String,
+    args: String,
+) -> Answer<crate::dto::TgWsStatus> {
+    blocking(move || crate::tgws::save_config(&handle, port, secret, args)).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn open_tg_proxy(handle: AppHandle) -> Answer<()> {
+    blocking(move || crate::tgws::open(&actions::state(&handle).settings())).await
+}
+
 
 #[tauri::command]
 #[specta::specta]

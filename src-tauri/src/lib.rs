@@ -13,6 +13,7 @@ mod settings;
 mod shell;
 mod state;
 mod texts;
+mod tgws;
 mod tray;
 mod window;
 
@@ -79,6 +80,11 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::nft_rules,
             commands::service_logs,
             commands::flush_dns,
+            commands::tg_ws_status,
+            commands::install_tg_ws,
+            commands::set_tg_ws_enabled,
+            commands::save_tg_ws_config,
+            commands::open_tg_proxy,
             commands::get_exclusions,
             commands::save_exclusions,
             commands::quick_check,
@@ -128,7 +134,14 @@ pub fn run() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION"),
         paths.exe_dir.display()
     );
-    let (settings, damaged) = settings::load_or_default(&paths.settings());
+    let (mut settings, damaged) = settings::load_or_default(&paths.settings());
+    // The `tg://proxy` link must survive restarts: a secret absent from the file is generated
+    // once here. Best effort: the app still starts, the field stays empty on disk.
+    if let Err(err) = crate::tgws::ensure_secret(&mut settings) {
+        log::warn!("cannot generate the tg-ws secret: {err:#}");
+    } else if let Err(err) = settings::save(&paths.settings(), &settings) {
+        log::warn!("cannot save the generated tg-ws secret: {err:#}");
+    }
     let state = AppState::new(paths, settings);
     state.migrate_strategies();
     if let Some(text) = damaged {
