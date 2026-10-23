@@ -40,6 +40,14 @@ pub struct Settings {
     /// The exclusions card's ports (`51413`, `6881-6889`): traffic on them leaves the nfqueue;
     /// the nftables queue is baked with them at every apply (zapret2 spec 5.1).
     pub excluded_ports: Vec<String>,
+    /// The `tg-ws-proxy-rs` service: only `set_tg_ws_enabled` writes the flag (tgws spec 2).
+    pub tg_ws_enabled: bool,
+    /// The MTProto port `tg-ws-proxy` listens on.
+    pub tg_ws_port: u16,
+    /// 32 hex characters: the MTProto secret; empty means «generate once» (`tgws::ensure_secret`).
+    pub tg_ws_secret: String,
+    /// Extra CLI flags after `--secret`, e.g. `--fronting-domain example.com`.
+    pub tg_ws_args: String,
 }
 
 impl Default for Settings {
@@ -55,6 +63,10 @@ impl Default for Settings {
             router_enabled: false,
             game_filter: true,
             excluded_ports: Vec::new(),
+            tg_ws_enabled: false,
+            tg_ws_port: 1443,
+            tg_ws_secret: String::new(),
+            tg_ws_args: String::new(),
         }
     }
 }
@@ -180,6 +192,10 @@ mod tests {
             router_enabled: true,
             game_filter: true,
             excluded_ports: vec!["51413".into()],
+            tg_ws_enabled: true,
+            tg_ws_port: 1443,
+            tg_ws_secret: "ab".repeat(16),
+            tg_ws_args: "--fronting-domain example.com".into(),
         };
         save(&path, &settings).unwrap();
         assert_eq!(load(&path).unwrap(), settings);
