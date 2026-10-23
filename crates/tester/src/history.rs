@@ -15,7 +15,29 @@ pub fn save(dir: &Path, run: &TestRun) -> anyhow::Result<()> {
         dir.join(format!("{}.json", run.id)),
         serde_json::to_string(run)?,
     )?;
+    prune(dir);
     Ok(())
+}
+
+/// Keeps only the newest [`KEEP`] run files: the id is the file name, so name order is age order.
+const KEEP: usize = 50;
+
+fn prune(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+    files.reverse();
+    for path in files.iter().skip(KEEP) {
+        if let Err(err) = std::fs::remove_file(path) {
+            log::error!("old test run kept, {}: {err}", path.display());
+        }
+    }
 }
 
 pub fn load(dir: &Path, id: &str) -> anyhow::Result<TestRun> {
@@ -116,4 +138,43 @@ pub fn latest_ranking(dir: &Path) -> anyhow::Result<Option<TestRun>> {
     Ok(all(dir)?
         .into_iter()
         .find(|run| run.suite == Suite::Standard && !run.canceled))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(id: &str) -> TestRun {
+        TestRun {
+            id: id.into(),
+            suite: Suite::Standard,
+            zapret2_version: None,
+            canceled: false,
+            restore_error: None,
+            strategies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn save_keeps_only_the_newest_files() {
+        let dir = std::env::temp_dir().join(format!("zapret-hub-history-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..55 {
+            std::fs::write(dir.join(format!("{i:04}.json")), "{}").unwrap();
+        }
+        save(&dir, &run("9999")).unwrap();
+        let json = |dir: &Path| -> Vec<String> {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".json"))
+                .collect()
+        };
+        assert_eq!(json(&dir).len(), 50);
+        assert!(dir.join("9999.json").exists());
+        assert!(dir.join("0006.json").exists());
+        assert!(!dir.join("0004.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
