@@ -137,6 +137,28 @@ fn dispatch(app: &AppHandle, request: Request) -> Result<Value, String> {
             json(block_on(commands::add_route_preset(handle, preset))?)
         }
         Request::RouteFlows { all } => json(commands::route_flows(state, all)),
+        Request::StartService => json(block_on(commands::start_service(handle))?),
+        Request::StopService => json(block_on(commands::stop_service(handle))?),
+        Request::RestartService => json(block_on(commands::restart_service(handle))?),
+        Request::ServiceLogs => json(block_on(commands::service_logs())?),
+        Request::NftRules => json(block_on(commands::nft_rules())?),
+        Request::FlushDns => json(block_on(commands::flush_dns())?),
+        Request::GetExclusions => json(block_on(commands::get_exclusions(handle))?),
+        Request::SaveExclusions { exclusions } => {
+            let exclusions = serde_json::from_value(exclusions)
+                .map_err(|err| format!("the exclusions do not parse: {err}"))?;
+            json(block_on(commands::save_exclusions(handle, exclusions))?)
+        }
+        Request::TgWsStatus => json(block_on(commands::tg_ws_status(handle))?),
+        Request::InstallTgWs => json(block_on(commands::install_tg_ws(handle))?),
+        Request::SetTgWsEnabled { enabled } => {
+            json(block_on(commands::set_tg_ws_enabled(handle, enabled))?)
+        }
+        Request::SaveTgWsConfig { port, secret, args } => {
+            json(block_on(commands::save_tg_ws_config(handle, port, secret, args))?)
+        }
+        Request::Doctor => json(commands::doctor(handle)?),
+        Request::ProbeTarget { target } => json(commands::probe(handle, target)?),
     }
 }
 
