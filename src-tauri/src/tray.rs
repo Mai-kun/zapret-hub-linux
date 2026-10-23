@@ -85,7 +85,9 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         .icon(icon(Light::Gray, false))
         .tooltip(texts::APP)
         .menu(&menu(app, None, &[], false)?)
-        .show_menu_on_left_click(false)
+        // On Linux libayatana-appindicator emits no `on_tray_icon_event` on a left click: the menu
+        // (its «Открыть») is the only reaction. Elsewhere a left click opens the window directly.
+        .show_menu_on_left_click(!cfg!(target_os = "linux"))
         .on_menu_event(|app, event| on_menu(app, &event.id().0))
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
