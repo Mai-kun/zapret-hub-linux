@@ -78,6 +78,16 @@ export const commands = {
 	nftRules: () => typedError<string, string>(__TAURI_INVOKE("nft_rules")),
 	serviceLogs: () => typedError<string, string>(__TAURI_INVOKE("service_logs")),
 	flushDns: () => typedError<null, string>(__TAURI_INVOKE("flush_dns")),
+	/**  The TG WS Proxy card's contents: the binary on the disk, systemd and the journal in one go. */
+	tgWsStatus: () => typedError<TgWsStatus, string>(__TAURI_INVOKE("tg_ws_status")),
+	/**
+	 *  The latest `tg-ws-proxy-rs` release unpacked into the data folder, then the service back the
+	 *  way it was.
+	 */
+	installTgWs: () => typedError<TgWsStatus, string>(__TAURI_INVOKE("install_tg_ws")),
+	setTgWsEnabled: (enabled: boolean) => typedError<TgWsStatus, string>(__TAURI_INVOKE("set_tg_ws_enabled", { enabled })),
+	saveTgWsConfig: (port: number, secret: string, args: string) => typedError<TgWsStatus, string>(__TAURI_INVOKE("save_tg_ws_config", { port, secret, args })),
+	openTgProxy: () => typedError<null, string>(__TAURI_INVOKE("open_tg_proxy")),
 	/**  The exclusions card's contents: the exclude lists of zapret2 and the settings' ports. */
 	getExclusions: () => typedError<Exclusions, string>(__TAURI_INVOKE("get_exclusions")),
 	/**  The lists, the settings' ports, then the queue rewritten and the service restarted into it. */
@@ -95,6 +105,10 @@ export const commands = {
 	deleteRoute: (name: string) => typedError<null, string>(__TAURI_INVOKE("delete_route", { name })),
 	addRoutePreset: (preset: Preset) => typedError<Rule, string>(__TAURI_INVOKE("add_route_preset", { preset })),
 	routeFlows: (all: boolean) => __TAURI_INVOKE<FlowRow[]>("route_flows", { all }),
+	/**  `doctor`: every subsystem at once, with what to fix. */
+	doctor: () => typedError<DoctorReport, string>(__TAURI_INVOKE("doctor")),
+	/**  `probe` of one domain or URL: DNS, the lists, the routing rule, HTTP/TLS and a ping. */
+	probe: (target: string) => typedError<ProbeResult, string>(__TAURI_INVOKE("probe", { target })),
 	/**  The editor's checks as it types: nothing saved. */
 	validateRoute: (rule: Rule) => __TAURI_INVOKE<FieldError[]>("validate_route", { rule }),
 	/**  `ips` and `domains` plus the entries of a list file (one subnet or domain per line). */
@@ -117,6 +131,18 @@ export type Analysis = {
 	/**  What winws2 would fail on, or what cannot work: the static check refuses these. */
 	errors: string[],
 	warnings: string[],
+};
+
+export type Bin = {
+	name: string,
+	bytes: number,
+	/**  The active strategy's text loads it. */
+	used_by_active: boolean,
+	/**
+	 *  0 bytes while the strategy sends it as a fake or a blob: DPI would answer with an empty
+	 *  packet.
+	 */
+	empty_used: boolean,
 };
 
 export type CacheDir = {
@@ -154,6 +180,14 @@ export type CheckResult = {
 
 export type CheckStatus = "Ok" | "Ssl" | "Unsup" | "Error";
 
+export type Checks = {
+	http: CheckResult,
+	tls12: CheckResult,
+	tls13: CheckResult,
+	/**  ICMP round trip; `None` on timeout or a target that answers no pings. */
+	ping_ms: number | null,
+};
+
 /**  What the builder writes. */
 export type CircularEdit = {
 	settings: CircularSettings,
@@ -190,6 +224,16 @@ export type CircularVariant = {
 	is_final: boolean,
 };
 
+export type Conflicts = {
+	/**
+	 *  Engine processes running that the service does not own: their handles take the packets
+	 *  the queue sends first.
+	 */
+	processes: string[],
+	/**  `zapretunix` and other third-party nftables with a zapret in the name. */
+	tables: string[],
+};
+
 /**  What the wizard finds before the user picks anything: the zapret2 folder. */
 export type Detected = {
 	zapret2: string | null,
@@ -202,6 +246,18 @@ export type DirectReason = { kind: "ProxyDown" } | { kind: "AuthRequired" } | { 
 { kind: "NotAccepted" } | 
 /**  Caught for a program rule, but this flow matches no rule. */
 { kind: "NoRule" };
+
+/**  Everything at once; `issues` is what to fix and how, empty when it all looks healthy. */
+export type DoctorReport = {
+	engine: EngineDiag,
+	lists_and_bins: ListsAndBins,
+	service: ServiceDiag,
+	nfqueue: NfQueueDiag,
+	nftables: NftDiag,
+	conflicts: Conflicts,
+	proxies: ProxiesDiag,
+	issues: string[],
+};
 
 /**  A release download from the window: bytes so far and the zip's size (0 when GitHub gave none). */
 export type DownloadProgress = {
@@ -240,6 +296,23 @@ export type DpiTargetResult = {
 };
 
 export type Engine = "Zapret2";
+
+/**  The engine: where it is, what it says, and whether the system lets it take packets. */
+export type EngineDiag = {
+	/**
+	 *  The engine file; `None` while the zapret2 folder is unset or does not open, `error`
+	 *  says why.
+	 */
+	path: string | null,
+	error: string | null,
+	/**  `nfqws2 --version` as the overview shows it. */
+	version: string | null,
+	/**  The Unix exec bits of the engine file (true for a Windows build). */
+	executable: boolean,
+	/**  What `getcap` says; both are checked only for a `nfqws2` build. */
+	cap_net_admin: boolean,
+	cap_net_raw: boolean,
+};
 
 /**
  *  What the «Исключения из zapret» card edits: the two exclude lists of zapret2 (one entry per
@@ -306,6 +379,16 @@ export type LastResult = {
 	stale: boolean,
 };
 
+/**  `doctor`'s `lists_and_bins`. */
+export type ListsAndBins = {
+	/**  Non-empty, non-comment lines; `None` while zapret2 is unset. */
+	general_domains: number | null,
+	google_domains: number | null,
+	exclude_user_domains: number | null,
+	/**  Every `.bin` of the engine's bin folder. */
+	bins: Bin[],
+};
+
 /**  The run in progress, for a page opened in the middle of it. */
 export type LiveRun = {
 	request: Request,
@@ -316,6 +399,22 @@ export type LiveRun = {
 	pass: number,
 	/**  Each strategy once, its passes so far aggregated, in the order they first finished. */
 	results: StrategyResult[],
+};
+
+export type Matchings = {
+	/**  In `list-general.txt` or `list-general-user.txt`. */
+	in_list_general: boolean,
+	/**  In `list-google.txt`. */
+	in_list_google: boolean,
+	/**  In `list-exclude.txt` or `list-exclude-user.txt`: the exclusions let it through. */
+	excluded_domain: boolean,
+	/**  One of the resolved IPs is in `ipset-exclude.txt` or `ipset-exclude-user.txt`. */
+	excluded_ip: boolean,
+	/**
+	 *  The first enabled rule of `routes.toml` whose domains cover the host or whose subnets
+	 *  hold one of the resolved IPs.
+	 */
+	matched_route_rule: string | null,
 };
 
 export type MergeNote = {
@@ -331,6 +430,28 @@ export type MergeNote = {
 export type Merged = {
 	text: string,
 	notes: MergeNote[],
+};
+
+/**
+ *  `/proc/net/netfilter/nfnetlink_queue`, in the kernel's own order: the queue number, the
+ *  listener's netlink port, then the packets waiting in the queue.
+ */
+export type NfQueueDiag = {
+	/**  A line for queue 200 with a portid other than 0: something has the queue open. */
+	open: boolean,
+	/**  The netlink port of the engine holding it; 0 means nobody is there. */
+	peer_portid: number | null,
+	/**  Packets sitting in the queue. */
+	queue_total: number | null,
+};
+
+export type NftDiag = {
+	/**  `nft list table inet zapret_hub` answered with rules. */
+	active: boolean,
+	/**  `oifname "lo"` accepts: queued loopback packets stall local connections. */
+	lo_skip: boolean,
+	/**  The mark rule that keeps `nfqws2`'s own packets out of the queue. */
+	fwmark: boolean,
 };
 
 /**  What `merge` did with a profile, for its preview. */
@@ -390,6 +511,18 @@ export type Pass = {
 
 export type Preset = "discord-voice" | "discord" | "cloudflare" | "telegram" | "twitch" | "dbd";
 
+/**
+ *  A domain (`discord.com`) or URL (`https://gateway.discord.gg`): where it goes, what the
+ *  zapret2 lists and the routing rules think of it, whether it answers through zapret.
+ */
+export type ProbeResult = {
+	host: string,
+	url: string,
+	resolved_ips: string[],
+	matching: Matchings,
+	checks: Checks,
+};
+
 /**  A profile as the card and the builder show it. */
 export type Profile = {
 	/**  From 0, counting every `--new`: what `CircularTarget` names. */
@@ -417,6 +550,11 @@ export type Progress =
 { kind: "Done"; result: StrategyResult } | { kind: "Restoring" };
 
 export type Protocol = "tcp" | "udp" | "both";
+
+export type ProxiesDiag = {
+	socks5: SocksDiag,
+	tg_ws: TgWsDiag,
+};
 
 export type ProxyState = { state: "Unknown" } | { state: "Ok"; latency_ms: number } | { state: "Down"; error: string } | { state: "AuthRequired" } | { state: "NoUdp" };
 
@@ -510,6 +648,13 @@ export type Score = {
 	youtube: ProfileScore,
 };
 
+export type ServiceDiag = {
+	name: string,
+	state: SvcState,
+	strategy: string | null,
+	game_filter: boolean,
+};
+
 export type Settings = {
 	/**  The zapret2 folder (zapret2 spec 4); `None` while zapret2 is off. */
 	zapret2_dir?: string | null,
@@ -534,6 +679,22 @@ export type Settings = {
 	 *  the nftables queue is baked with them at every apply (zapret2 spec 5.1).
 	 */
 	excluded_ports?: string[],
+	/**  The `tg-ws-proxy-rs` service: only `set_tg_ws_enabled` writes the flag (tgws spec 2). */
+	tg_ws_enabled?: boolean,
+	/**  The MTProto port `tg-ws-proxy` listens on. */
+	tg_ws_port?: number,
+	/**  32 hex characters: the MTProto secret; empty means «generate once» (`tgws::ensure_secret`). */
+	tg_ws_secret?: string,
+	/**  Extra CLI flags after `--secret`, e.g. `--fronting-domain example.com`. */
+	tg_ws_args?: string,
+};
+
+export type SocksDiag = {
+	/**  The setting holds an address. */
+	set: boolean,
+	/**  It answered a SOCKS5 greeting now. */
+	ok: boolean,
+	error: string | null,
 };
 
 /**  zapret, the settings or the history changed: the page reads what it shows again. */
@@ -616,6 +777,35 @@ export type TestRun = {
 /**  The run is over and zapret is back; `run_id` is `None` when it failed before a result. */
 export type TestsFinished = {
 	run_id: string | null,
+};
+
+export type TgWsDiag = {
+	installed: boolean,
+	/**  `systemctl --user is-active` answers «active». */
+	running: boolean,
+	/**  The settings' port. */
+	port: number,
+	/**  A TCP connection to the port got through. */
+	listening: boolean,
+};
+
+/**  The tg-ws-proxy service: what the overview's and the tools' cards show, read in one go. */
+export type TgWsStatus = {
+	/**  The static binary is on the disk. */
+	installed: boolean,
+	/**  The tag from the release `version.txt` keeps next to the binary. */
+	version: string | null,
+	/**  `systemctl --user is-active` answers «active». */
+	running: boolean,
+	port: number,
+	/**  The 32 hex characters of the MTProto secret (or the empty default before a save). */
+	secret: string,
+	/**  The extra CLI flags after `--secret`. */
+	args: string,
+	/**  `tg://proxy?server=127.0.0.1&port=<port>&secret=dd<secret>`. */
+	tg_url: string,
+	/**  The last lines of the unit's journal. */
+	logs: string,
 };
 
 export type Theme = "system" | "light" | "dark";
