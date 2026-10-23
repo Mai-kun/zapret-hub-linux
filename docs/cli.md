@@ -141,17 +141,49 @@ PowerShell читает вывод программ в кодировке `[Cons
 | `routes remove <name> --yes` | удаляет правило | `delete_route` |
 | `routes preset discord-voice\|discord\|dbd` | добавляет готовое правило «Discord голос», «Discord целиком» или «Dead by Daylight» | `add_route_preset` |
 | `routes flows [--all]` | открытые потоки и закрытые за последние 30 с; `--all` — и потоки без правила, пойманные ради правил по программе | `route_flows` |
+| `service start\|stop\|restart` | запускает, останавливает или перезапускает активную службу с быстрой проверкой | `start_service`, `stop_service`, `restart_service` |
+| `service logs` | последние строки журнала службы | `service_logs` |
+| `nft` | правила nftables сейчас | `nft_rules` |
+| `dns-flush` | сбрасывает кэш DNS системы | `flush_dns` |
+| `exclusions show` | три списка исключений zapret2: домены, IP-подсети, порты мимо очереди | `get_exclusions` |
+| `exclusions add <list> <value>`, `exclusions remove <list> <value>` | запись в список: `domains`, `ips`, `ports`; значение проверяется до отправки: домен, IPv4-подсеть `a.b.c.d/n` или порт/диапазон | `get_exclusions`, `save_exclusions` |
+| `exclusions reset --yes` | возвращает исключения по умолчанию: свои списки пусты, портов нет | `get_exclusions`, `save_exclusions` |
+| `tg-ws status` | служба TG WS Proxy: диск, systemd, журнал и настройки | `tg_ws_status` |
+| `tg-ws install` | свежий релиз `tg-ws-proxy` распакован и служба готова | `install_tg_ws` |
+| `tg-ws on\|off` | служба включена и запущена / выключена | `set_tg_ws_enabled` |
+| `tg-ws config [--port <p>] [--secret <s>] [--args <a>]` | меняет только названные поля; без аргументов — код 2 | `tg_ws_status`, `save_tg_ws_config` |
+| `doctor` | вся картина сразу: движок и его права, списки и `.bin`, служба, очередь nfqueue, nftables, чужие процессы и таблицы, оба прокси, и `issues` — что чинить и как | `doctor` |
+| `probe <домен\|URL>` | живая диагностика цели: DNS-адреса, где она в списках zapret2, какое правило её ведёт, HTTP/TLS1.2/TLS1.3 и ping | `probe` |
 
 `--yes` повторяет подтверждения окна и ставится в любом месте команды. Без него эти команды не отправляются:
 код 2.
 
 Команд окна, которых нет в CLI:
-- `pick_folder`, `open_url`, `open_folder` — открывают окна, файловый менеджер и браузер;
+- `pick_folder`, `open_url`, `open_folder`, `open_tg_proxy` — открывают окна, файловый менеджер и браузер;
 - `check_folder`, `check_zapret2_folder` — открыли бы путь, переданный клиентом (второй ещё и запустил бы из него
-  `winws2.exe`), а папки zapret и zapret2 CLI не меняет (раздел «Настройки»);
+  `winws2.exe`), а папки zapret, zapret2 CLI не меняет (раздел «Настройки»);
+- `download_engine`, `cancel_download`, `default_download_parent` — загрузки идёт только из окна (раздел
+  «Настройки»);
+- `zapret2_profiles`, `zapret2_circular`, `zapret2_merge` — служебные справки редактора стратегий окна;
 - `take_notices` — забрал бы уведомления у окна;
 - `test_live` — его заменяет `tests status`;
 - `validate_route`, `import_route_lines` — проверка и импорт строк в редакторе правила окна.
+
+## Диагностика: doctor и probe
+
+Команды для ИИ-агента: одна выдаёт состояние сразу всего, вторая — всё об одном домене.
+
+`zapret-hub-cli doctor` печатает одним документом: движок (путь, версия, права и capabilities), счётчики списков
+и каждый `.bin` с пометкой «используется активной стратегией»/«нулевой размер», состояние службы и её стратегию,
+очередь nfqueue (кто держит и сколько пакетов ждёт), nftables-таблицу (применена ли, стоят ли пропуски loopback и
+ марки nfqws2), чужие процессы движка и посторонние таблицы `zapret*`, оба прокси (SOCKS5 отвечает, tg-ws слушает
+порт), и `issues` — что чинить, вместе с командой для починки (например,
+`sudo setcap 'cap_net_admin,cap_net_raw=eip' …` для движка). Пустой `issues` — всё выглядит здоровым.
+
+`zapret-hub-cli probe https://gateway.discord.gg` отвечает на «что с этим доменом»:
+`resolved_ips` — адреса DNS, `matching` — в каких списках zapret2 домен (general, google, исключения, ipset
+исключений) и правило `routes.toml`, которое его ведёт, `checks` — HTTP, TLS1.2 и TLS1.3 (тот же curl, что в
+тестах) и время ping. Открывается и короткая форма: `probe discord.com` считается как `https://discord.com`.
 
 ## Настройки
 
@@ -167,6 +199,7 @@ PowerShell читает вывод программ в кодировке `[Cons
 | `start_minimized` | `true` или `false`: при автозапуске оставаться в трее |
 | `theme` | `system`, `light` или `dark` |
 | `cli_enabled` | `false` выключает CLI; включить его из CLI нельзя |
+| `game_filter` | `true` — диапазон всех портов целиком, `false` — только порт 12 (плейсхолдер портов игры) |
 
 Папки zapret и zapret2 (`zapret_dir`, `zapret2_dir`) CLI не меняет: службы zapret и zapret2 запускают из них
 `winws.exe` и `winws2.exe` от SYSTEM, поэтому папки меняют только в окне («Настройки» → «Папка zapret» или
