@@ -332,6 +332,8 @@ enum FixTarget {
     RestoreService,
     RepairBins,
     KillConflicts,
+    EnableTcpTimestamps,
+    LoadKernelModules,
 }
 
 /// The JSON the app's `FixAction` reads: the same names its serde tags carry.
@@ -342,6 +344,8 @@ fn fix_action(target: FixTarget) -> Value {
             FixTarget::RestoreService => "restore_service",
             FixTarget::RepairBins => "repair_bins",
             FixTarget::KillConflicts => "kill_conflicts",
+            FixTarget::EnableTcpTimestamps => "enable_tcp_timestamps",
+            FixTarget::LoadKernelModules => "load_kernel_modules",
         }
     })
 }
@@ -704,7 +708,13 @@ fn run(args: Cli, call: Call, note: Note) -> Result<Done, Fail> {
         Command::Fix { target } => Request::FixDoctorIssue {
             action: fix_action(target),
         },
-        Command::Probe { target } => Request::ProbeTarget { target },
+        Command::Probe { target } => {
+            let data = call(Request::ProbeTarget { target })?;
+            if let Some(count) = data["intercepted_packets"].as_u64() {
+                note(&format!("Перехвачено nfqws2: {count} пак."));
+            }
+            return Ok(Done::Json(data));
+        }
     };
     // A command without a result answers `null`: an explicit ok then.
     call(request).map(|data| {
@@ -1316,6 +1326,18 @@ mod tests {
                 },
             ),
             (
+                &["fix", "enable-tcp-timestamps"],
+                Request::FixDoctorIssue {
+                    action: fix_action(FixTarget::EnableTcpTimestamps),
+                },
+            ),
+            (
+                &["fix", "load-kernel-modules"],
+                Request::FixDoctorIssue {
+                    action: fix_action(FixTarget::LoadKernelModules),
+                },
+            ),
+            (
                 &["probe", "https://discord.com"],
                 Request::ProbeTarget {
                     target: "https://discord.com".into(),
@@ -1853,8 +1875,26 @@ mod tests {
     }
 
     #[test]
-    fn progress_goes_to_notes_and_never_into_the_json() {
-        let live = json!({ "request": { "suite": "Standard", "strategies": ["a", "b"], "repeats": 3 },
+    fn probe_names_the_intercepted_packets_on_stderr_and_mirrors_the_json() {
+        let report = json!({
+            "host": "discord.com",
+            "intercepted_packets": 12,
+        });
+        let (outcome, asked, notes) = drive_noted(
+            &["probe", "discord.com"],
+            vec![Ok(report.clone())],
+        );
+        assert_eq!(asked, [Request::ProbeTarget { target: "discord.com".into() }]);
+        assert_eq!(outcome, Ok(Done::Json(report)));
+        assert_eq!(notes, ["Перехвачено nfqws2: 12 пак."]);
+        // No counter to read: no note, the JSON just passes through.
+        let (outcome, _, notes) = drive_noted(&["probe", "ya.ru"], vec![Ok(json!({}))]);
+        assert_eq!(outcome, Ok(Done::Json(json!({}))));
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn progress_goes_to_notes_and_never_into_the_json() {        let live = json!({ "request": { "suite": "Standard", "strategies": ["a", "b"], "repeats": 3 },
             "current": 1, "restoring": false, "pass": 0, "results": [] });
         let going = json!({ "testing": true, "live": live, "last": null });
         let ended = json!({ "testing": false, "live": null, "last": null });

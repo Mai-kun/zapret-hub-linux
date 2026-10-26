@@ -361,17 +361,54 @@ fn download(
     Ok(())
 }
 
-/// The unpack with `bsdtar` (libarchive is on every system here).
-fn expand(zip: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<()> {
+/// Unpacks an archive (`*.zip`, `*.tar.gz`) into `dest` with whichever unpackers this Linux
+/// distribution has: GNU `tar` is on every system, `unzip` and `python3` almost everywhere,
+/// `bsdtar` (libarchive) ships with Fedora/Arch only — each covers where another is missing.
+pub fn expand(archive: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Result<()> {
     std::fs::create_dir_all(dest).with_context(|| format!("cannot create {}", dest.display()))?;
-    let mut cmd = Command::new("bsdtar");
-    cmd.arg("-xf").arg(zip).arg("-C").arg(dest);
-    let out = exec::run(&mut cmd, Duration::from_secs(300), Some(cancel))?;
-    if out.canceled {
-        anyhow::bail!("canceled");
+    let shown = archive.display().to_string();
+    let dest_str = dest.display().to_string();
+    let attempts: Vec<(&str, Vec<String>)> = if shown.to_ascii_lowercase().ends_with(".tar.gz") {
+        vec![("tar", vec!["-xzf"]), ("bsdtar", vec!["-xf"])]
+            .into_iter()
+            .map(|(program, start)| {
+                let mut args: Vec<String> = start.iter().map(|arg| arg.to_string()).collect();
+                args.push(shown.clone());
+                args.extend(["-C".into(), dest_str.clone()]);
+                (program, args)
+            })
+            .collect()
+    } else {
+        vec![
+            (
+                "unzip",
+                vec!["-q".into(), shown.clone(), "-d".into(), dest_str.clone()],
+            ),
+            ("bsdtar", vec!["-xf".into(), shown.clone(), "-C".into(), dest_str.clone()]),
+            (
+                "python3",
+                vec!["-m".into(), "zipfile".into(), "-e".into(), shown.clone(), dest_str.clone()],
+            ),
+        ]
+    };
+    let mut first = None;
+    for (program, args) in attempts {
+        let mut cmd = Command::new(program);
+        cmd.args(&args);
+        let out = exec::run(&mut cmd, Duration::from_secs(300), Some(cancel))?;
+        if out.canceled {
+            anyhow::bail!("canceled");
+        }
+        if out.success() {
+            return Ok(());
+        }
+        first.get_or_insert(format!("{program} {args:?}: {}", out.describe()));
     }
-    out.check()?;
-    Ok(())
+    anyhow::bail!(
+        "{} cannot be unpacked: no unpacker of this system did it ({})",
+        shown,
+        first.unwrap_or_default()
+    )
 }
 
 /// The unpacked release: its one top folder when the zip has one, else everything.
@@ -540,5 +577,76 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         move_up(&raw, &dir).unwrap();
         assert!(dir.join("sha256sum.txt").is_file() && dir.join("zapret2-v0.9.4").is_dir());
+    }
+
+    /// How the machine makes the archive of `kind`: zip via `python3 -m zipfile -c`, tar.gz via
+    /// `tar -czf` (neither maker is the unpacker under test).
+    fn maker(kind: &str) -> (&'static str, Vec<String>) {
+        if kind == ".tar.gz" {
+            return ("tar", vec!["-czf".into()]);
+        }
+        ("python3", vec!["-m".into(), "zipfile".into(), "-c".into()])
+    }
+
+    #[test]
+    fn unpacks_zip_and_tar_gz_without_bsdtar() {
+        let cancel = AtomicBool::new(false);
+        for kind in [".zip", ".tar.gz"] {
+            let (maker_prog, mut maker_args) = maker(kind);
+            let tmp = tempfile::tempdir().unwrap();
+            let src = tmp.path().join("src");
+            std::fs::create_dir_all(src.join("binaries")).unwrap();
+            std::fs::write(src.join("binaries").join("nfqws2"), "engine").unwrap();
+            let archive = tmp.path().join(format!("a{kind}"));
+            maker_args.push(archive.display().to_string());
+            maker_args.push(src.join("binaries").display().to_string());
+            let made = exec::run(
+                Command::new(maker_prog).args(&maker_args),
+                Duration::from_secs(60),
+                None,
+            )
+            .map(|out| out.success())
+            .unwrap_or(false);
+            if !made {
+                continue; // no maker tool here either
+            }
+            let dest = tmp.path().join("dest");
+            super::expand(&archive, &dest, &cancel).unwrap();
+            // The makers nest their entries differently: look the engine up anywhere in the tree.
+            let mut all = Vec::new();
+            files_under(&dest, &mut all);
+            let nfqws = all
+                .into_iter()
+                .find(|path| path.file_name() == Some("nfqws2".as_ref()))
+                .expect("the unpacked tree holds nfqws2");
+            assert_eq!(
+                std::fs::read(nfqws).unwrap(),
+                b"engine",
+                "{kind} leaves the engine unpacked"
+            );
+        }
+    }
+
+    /// Every regular file under `path`, recursively.
+    fn files_under(path: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(path).unwrap_or_else(|err| panic!("{path:?}: {err}")).flatten() {
+            let child = path.join(entry.file_name());
+            if child.is_dir() {
+                files_under(&child, out);
+            } else {
+                out.push(child);
+            }
+        }
+    }
+
+    #[test]
+    fn a_junk_archive_name_names_its_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("x.tar.gz");
+        std::fs::write(&archive, b"junk").unwrap();
+        let err = super::expand(&archive, &tmp.path().join("d"), &AtomicBool::new(false))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot be unpacked"), "{err}");
     }
 }

@@ -6,6 +6,7 @@
 //!
 //! Rights: `nft` and the table file live under root, so `zapret::root` runs them through `sudo`.
 
+use anyhow::Context as _;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -66,12 +67,12 @@ pub fn table(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> String {
     }
     if !tcp_ports.is_empty() {
         rules.push_str(&format!(
-            "        tcp dport {{ {tcp_ports} }} ct original packets 1-12 queue num {QNUM} bypass\n"
+            "        tcp dport {{ {tcp_ports} }} ct original packets 1-12 counter queue num {QNUM} bypass\n"
         ));
     }
     if !udp_ports.is_empty() {
         rules.push_str(&format!(
-            "        udp dport {{ {udp_ports} }} ct original packets 1-8 queue num {QNUM} bypass\n"
+            "        udp dport {{ {udp_ports} }} ct original packets 1-8 counter queue num {QNUM} bypass\n"
         ));
     }
     format!(
@@ -87,22 +88,12 @@ pub fn table(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> String {
     )
 }
 
-/// `nft` on the PATH (`which`), for absolute paths systemd's ExecStart needs.
+/// `nft` by its absolute path: `which` first, then the sbin folders a user `PATH` does not hold
+/// (Debian/Ubuntu put `nft` into `/usr/sbin`), for systemd's unit lines.
 pub fn nft_path() -> anyhow::Result<PathBuf> {
-    let which = exec::run(
-        Command::new("which").arg("nft"),
-        Duration::from_secs(10),
-        None,
-    )?;
-    anyhow::ensure!(
-        which.success(),
+    let path = zapret::root::which("nft").with_context(|| {
         "nftables was not found on this system: install nftables, nfqws2 needs it"
-    );
-    let path = which.stdout.trim();
-    anyhow::ensure!(
-        path.starts_with('/'),
-        "which answered with a relative nft: {path}"
-    );
+    })?;
     Ok(PathBuf::from(path))
 }
 
@@ -241,8 +232,8 @@ mod tests {
             "meta skgid zapret-bypass return",
             "th dport { 51413, 6881-6889 } return",
             "th sport { 51413, 6881-6889 } return",
-            "tcp dport { 443,80 } ct original packets 1-12 queue num 200 bypass",
-            "udp dport { 443 } ct original packets 1-8 queue num 200 bypass",
+            "tcp dport { 443,80 } ct original packets 1-12 counter queue num 200 bypass",
+            "udp dport { 443 } ct original packets 1-8 counter queue num 200 bypass",
         ] {
             assert!(text.contains(part), "{part}: {text}");
         }

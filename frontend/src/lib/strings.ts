@@ -646,6 +646,26 @@ export const S = {
       proxiesHint: (tg: string, socks: string) => `TG WS Proxy: ${tg}; SOCKS5: ${socks}`,
       noEngine: "папка zapret2 не выбрана — см. «Обзор»",
       noVersion: "версия не читается",
+      tcpTimestamps: "TCP Timestamps",
+      tcpTimestampHint: (on: boolean | null) =>
+        on === true
+          ? "включены (/proc/sys/net/ipv4/tcp_timestamps = 1)"
+          : on === false
+            ? "выключены — стратегии с tcp_ts (ALT11, ALT12 и др.) не сработают"
+            : "неизвестно: /proc/sys не читается",
+      modules: "Модули ядра и зависимости",
+      modulesHint: (nfqueue: boolean, missing: string[], distro: string) => {
+        const parts: string[] = [
+          nfqueue
+            ? "модуль nfnetlink_queue в ядре"
+            : "модуль nfnetlink_queue не загружен",
+          missing.length === 0
+            ? "утилиты на месте"
+            : `нет утилит: ${missing.join(", ")}`,
+        ];
+        return `${parts.join("; ")} (дистрибутив: ${distro})`;
+      },
+      installCommand: (command: string) => `Установить: ${command}`,
     },
     issuesTitle: "Найденные проблемы",
     probe: {
@@ -674,6 +694,7 @@ export const S = {
       tls12: "TLS 1.2",
       tls13: "TLS 1.3",
       ping: "ICMP Ping",
+      intercepted: (n: number) => `Перехвачено nfqws2: ${n} пак.`,
       summary: {
         dnsMiss: "Домен не разрешился: первый шаг пути уже сорвался — см. «Системный DNS».",
         excluded: "Домен заблокирован в списке исключений.",

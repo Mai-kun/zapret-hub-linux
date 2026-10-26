@@ -29,6 +29,38 @@ fn wrapper() -> Option<&'static str> {
     .map(|(_, name)| name.expect("every wrapper carries a name"))
 }
 
+/// The usual folders of a tool: `/sbin` and `/usr/sbin` hold `nft`, `modprobe` and `sysctl` on
+/// Debian, Fedora and openSUSE, and a user session's `PATH` there does not cover them.
+const PATH_DIRS: &[&str] = &["/usr/bin", "/usr/sbin", "/sbin", "/bin"];
+
+/// The absolute path of a system tool: `which` on the `PATH` first, then the usual bin and sbin
+/// folders (`which` finds the user's own `PATH` only). What systemd's unit lines and `sudo` need.
+pub fn which(prog: &str) -> Option<String> {
+    // A program with separators is a file to look up directly, no `which()` needed.
+    if !prog.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    let mut cmd = Command::new("which");
+    cmd.arg(prog);
+    if let Ok(out) = exec::run(&mut cmd, Duration::from_secs(5), None)
+        && out.success()
+    {
+        let path = out.stdout.trim().to_owned();
+        if path.starts_with('/') {
+            return Some(path);
+        }
+    }
+    find_in(PATH_DIRS, prog)
+}
+
+/// The first existing `dir/prog` (the core of `which`, covered by a test).
+fn find_in(dirs: &[&str], prog: &str) -> Option<String> {
+    dirs.iter()
+        .map(|dir| format!("{dir}/{prog}"))
+        .find(|path| Path::new(path).is_file())
+        .map(|path| path.to_owned())
+}
+
 /// `prog` with `args` under root rights: directly as root, else through the rights wrapper.
 pub fn command(prog: &str, args: &[&str]) -> anyhow::Result<Command> {
     let mut cmd = if is_root() {
@@ -125,5 +157,27 @@ mod tests {
     fn the_hint_says_what_to_do() {
         assert!(HINT.contains("sudo -E"));
         assert!(HINT.contains("polkit"));
+    }
+
+    #[test]
+    fn a_tool_is_found_in_the_first_dir_that_has_it_and_nowhere_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let bins = dir.path().join("bin");
+        let sbins = dir.path().join("sbin");
+        std::fs::create_dir(&bins).unwrap();
+        std::fs::create_dir(&sbins).unwrap();
+        std::fs::write(sbins.join("nft"), "").unwrap();
+        std::fs::write(bins.join("curl"), "").unwrap();
+        let names = [&bins, &sbins];
+        let dirs: Vec<&str> = names.iter().map(|p| p.to_str().unwrap()).collect();
+        assert_eq!(
+            find_in(&dirs, "nft").unwrap(),
+            sbins.join("nft").display().to_string(),
+            "sbin counts even though a user PATH does not hold it"
+        );
+        assert_eq!(find_in(&dirs, "curl").unwrap(), bins.join("curl").display().to_string());
+        assert_eq!(find_in(&dirs, "nothing"), None);
+        // `which` refuses a program that is not a plain name.
+        assert_eq!(which("bin/nft"), None);
     }
 }

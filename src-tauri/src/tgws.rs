@@ -374,10 +374,8 @@ fn unpack(
         .map(|bytes| zapret::sha256_hex(&bytes))
         .with_context(|| format!("cannot read {}", tgz.display()))?;
     log::info!("{ASSET} SHA-256 {sha256}");
-    let mut cmd = Command::new("bsdtar");
-    cmd.arg("-xf").arg(&tgz).arg("-C").arg(&raw);
-    exec::run(&mut cmd, Duration::from_secs(300), Some(cancel))?.check()?;
-    anyhow::ensure!(!cancel.load(Ordering::Relaxed), "canceled");
+    // The same cross-distro unpacking `release.rs` uses: GNU tar anywhere, bsdtar as a fallback.
+    zapret::release::expand(&tgz, &raw, cancel)?;    anyhow::ensure!(!cancel.load(Ordering::Relaxed), "canceled");
     let to = bin();
     std::fs::copy(find_binary(&raw)?, &to)
         .with_context(|| format!("cannot write {}", to.display()))?;

@@ -244,6 +244,17 @@ export type Conflicts = {
 	tables: string[],
 };
 
+/**
+ *  The Linux distribution of `/etc/os-release` and the system tools `doctor` needs: what is
+ *  missing and the exact install command of this distribution's package manager.
+ */
+export type DepsDiag = {
+	/**  Tools not found (`nft`, `curl`, `getcap`, `setcap`), in the fixed report order. */
+	missing: string[],
+	/**  The exact command, when something is missing: `sudo pacman -S nftables …`. */
+	install_command: string | null,
+};
+
 /**  What the wizard finds before the user picks anything: the zapret2 folder. */
 export type Detected = {
 	zapret2: string | null,
@@ -267,6 +278,14 @@ export type DoctorReport = {
 	nftables: NftDiag,
 	conflicts: Conflicts,
 	proxies: ProxiesDiag,
+	/**  `/proc/sys/net/ipv4/tcp_timestamps`: `Some(false)` breaks every `tcp_ts` strategy. */
+	tcp_timestamps: boolean | null,
+	/**  `/proc/net/netfilter/nfnetlink_queue` exists: the kernel module that owns the queue. */
+	kernel_nfqueue: boolean,
+	/**  The distribution's name (`PRETTY_NAME`), for the missing-tools advice. */
+	distro: string,
+	/**  The system tools and how to install the missing ones under this distribution. */
+	deps: DepsDiag,
 	issues: Issue[],
 };
 
@@ -358,7 +377,14 @@ export type FixAction =
 /**  Empty or missing `.bin` files of the bin folder: a non-empty donor is copied over them. */
 { kind: "repair_bins" } | 
 /**  Outside engine processes and foreign `zapret*` nftables: they take the queue's packets. */
-{ kind: "kill_conflicts" };
+{ kind: "kill_conflicts" } | 
+/**
+ *  `/proc/sys/net/ipv4/tcp_timestamps` = 0 while a `tcp_ts` strategy needs it: the sysctl is
+ *  set and `/etc/sysctl.d/99-zapret-timestamps.conf` keeps it that way.
+ */
+{ kind: "enable_tcp_timestamps" } | 
+/**  The `nfnetlink_queue` kernel module is not loaded: the queue gets no packets at all. */
+{ kind: "load_kernel_modules" };
 
 export type FlowRow = {
 	protocol: string,
@@ -558,6 +584,12 @@ export type ProbeResult = {
 	resolved_ips: string[],
 	matching: Matchings,
 	checks: Checks,
+	/**
+	 *  Packets that went through `queue num 200` while the checks ran (the counters before them
+	 *  are subtracted): more than 0 is the site's traffic actually seen by nfqws2. The counter
+	 *  sum saturates at 4 billion, which a check of seconds never reaches.
+	 */
+	intercepted_packets: number | null,
 };
 
 /**  A profile as the card and the builder show it. */

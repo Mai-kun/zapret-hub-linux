@@ -264,10 +264,10 @@ fn uid_this_process() -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The absolute path of `nft`, what systemd's unit lines need.
+/// The absolute path of `nft`, what systemd's unit lines need — on Debian/Ubuntu it may live in
+/// `/usr/sbin`, which a user `PATH` does not hold.
 fn which_nft() -> Option<String> {
-    let out = cmd("which", &["nft"]).ok()?;
-    out.success().then(|| out.stdout.trim().to_owned())
+    crate::root::which("nft")
 }
 
 /// `systemctl stop` + the unit file gone with errors ignored, as `service.bat` does where it

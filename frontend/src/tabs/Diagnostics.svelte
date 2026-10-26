@@ -136,6 +136,20 @@
             ? "bad"
             : "ok",
       },
+      {
+        label: d.tcpTimestamps,
+        value: d.tcpTimestampHint(report.tcp_timestamps),
+        tone: report.tcp_timestamps === true ? "ok" : report.tcp_timestamps === false ? "bad" : "warn",
+      },
+      {
+        label: d.modules,
+        value: d.modulesHint(
+          report.kernel_nfqueue,
+          report.deps.missing,
+          report.distro,
+        ) + (report.deps.install_command ? ` — ${d.installCommand(report.deps.install_command)}` : ""),
+        tone: report.kernel_nfqueue && !report.deps.missing.length ? "ok" : "bad",
+      },
     ];
     return cells;
   }
@@ -261,6 +275,11 @@
             <span class="badge {result.checks.ping_ms ? 'ok' : 'bad'}">
               {S.diagnostics.probe.ping}: {result.checks.ping_ms ? `${result.checks.ping_ms} мс` : "нет ответа"}
             </span>
+            {#if result.intercepted_packets !== null}
+              <span class="badge {result.intercepted_packets > 0 ? 'ok' : 'warn'}">
+                {S.diagnostics.probe.intercepted(result.intercepted_packets)}
+              </span>
+            {/if}
           </div>
         </div>
         <p class="hint">{summary(result)}</p>

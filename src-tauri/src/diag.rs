@@ -36,6 +36,7 @@ const DNS_HOSTS: [&str; 2] = ["discord.com", "ya.ru"];
 const DNS_SERVERS: [&str; 2] = ["77.88.8.8:53", "8.8.8.8:53"];
 /// The drop-in the `FixSystemDns` fix writes: plain DNS, no failure of one server holds the rest.
 const RESOLVED_CONF: &str = "/etc/systemd/resolved.conf.d/99-zapret-dns.conf";
+const RESOLV_CONF: &str = "/etc/resolv.conf";
 const RESOLVED_CONFIG: &str =
     "[Resolve]\nDNS=77.88.8.8 77.88.8.1 8.8.8.8 1.1.1.1\nDomains=~.\nDNSOverTLS=no\n";
 
@@ -132,6 +133,16 @@ pub struct SocksDiag {
     pub error: Option<String>,
 }
 
+/// The Linux distribution of `/etc/os-release` and the system tools `doctor` needs: what is
+/// missing and the exact install command of this distribution's package manager.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, specta::Type)]
+pub struct DepsDiag {
+    /// Tools not found (`nft`, `curl`, `getcap`, `setcap`), in the fixed report order.
+    pub missing: Vec<String>,
+    /// The exact command, when something is missing: `sudo pacman -S nftables …`.
+    pub install_command: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct TgWsDiag {
     pub installed: bool,
@@ -164,6 +175,11 @@ pub enum FixAction {
     RepairBins,
     /// Outside engine processes and foreign `zapret*` nftables: they take the queue's packets.
     KillConflicts,
+    /// `/proc/sys/net/ipv4/tcp_timestamps` = 0 while a `tcp_ts` strategy needs it: the sysctl is
+    /// set and `/etc/sysctl.d/99-zapret-timestamps.conf` keeps it that way.
+    EnableTcpTimestamps,
+    /// The `nfnetlink_queue` kernel module is not loaded: the queue gets no packets at all.
+    LoadKernelModules,
 }
 
 /// One problem and its remedy: `text` is what is wrong, `fix` is what `[Исправить]` runs.
@@ -194,6 +210,14 @@ pub struct DoctorReport {
     pub nftables: NftDiag,
     pub conflicts: Conflicts,
     pub proxies: ProxiesDiag,
+    /// `/proc/sys/net/ipv4/tcp_timestamps`: `Some(false)` breaks every `tcp_ts` strategy.
+    pub tcp_timestamps: Option<bool>,
+    /// `/proc/net/netfilter/nfnetlink_queue` exists: the kernel module that owns the queue.
+    pub kernel_nfqueue: bool,
+    /// The distribution's name (`PRETTY_NAME`), for the missing-tools advice.
+    pub distro: String,
+    /// The system tools and how to install the missing ones under this distribution.
+    pub deps: DepsDiag,
     pub issues: Vec<Issue>,
 }
 
@@ -206,6 +230,10 @@ pub struct ProbeResult {
     pub resolved_ips: Vec<String>,
     pub matching: Matchings,
     pub checks: Checks,
+    /// Packets that went through `queue num 200` while the checks ran (the counters before them
+    /// are subtracted): more than 0 is the site's traffic actually seen by nfqws2. The counter
+    /// sum saturates at 4 billion, which a check of seconds never reaches.
+    pub intercepted_packets: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
@@ -248,6 +276,28 @@ pub fn doctor(app: &AppHandle) -> DoctorReport {
     let nftables = nftables(&service, &mut issues);
     let conflicts = conflicts(&service, &mut issues);
     let proxies = proxies(app, &settings, &mut issues);
+    let (distro, deps) = deps_diag(&mut issues);
+    let tcp_timestamps = service::tcp_timestamps();
+    if tcp_timestamps == Some(false) {
+        issue(
+            &mut issues,
+            "net.ipv4.tcp_timestamps is 0: the strategies with tcp_ts send extra timestamps \
+             first and DPI drops them — `fix` turns the sysctl on and keeps it in \
+             /etc/sysctl.d/99-zapret-timestamps.conf"
+                .to_owned(),
+            Some(FixAction::EnableTcpTimestamps),
+        );
+    }
+    let kernel_nfqueue = kernel_nfqueue();
+    if !kernel_nfqueue {
+        issue(
+            &mut issues,
+            "the nfnetlink_queue kernel module is not loaded: the queue gets no packets and \
+             nfqws2 idles — `fix` runs modprobe nfnetlink_queue and modprobe nft_queue"
+                .to_owned(),
+            Some(FixAction::LoadKernelModules),
+        );
+    }
     restore_service(&state, &mut issues);
     DoctorReport {
         system_dns,
@@ -258,6 +308,10 @@ pub fn doctor(app: &AppHandle) -> DoctorReport {
         nftables,
         conflicts,
         proxies,
+        tcp_timestamps,
+        kernel_nfqueue,
+        distro,
+        deps,
         issues,
     }
 }
@@ -279,8 +333,9 @@ fn system_dns(issues: &mut Vec<Issue>) -> SystemDnsDiag {
             issues,
             format!(
                 "the system DNS resolver does not answer while a direct UDP query of a public \
-                 resolver does: `fix` writes {RESOLVED_CONF} (the DNS servers above, plain no \
-                 DoT) and restarts systemd-resolved"
+                 resolver does: `fix` puts plain public resolvers back (a systemd-resolved \
+                 drop-in, a NetworkManager conf, or {RESOLV_CONF} itself, whatever this system \
+                 uses) and flushes the caches"
             ),
             Some(FixAction::FixSystemDns),
         );
@@ -896,6 +951,101 @@ fn proxies(app: &AppHandle, settings: &Settings, issues: &mut Vec<Issue>) -> Pro
     }
 }
 
+// --- distro and dependencies -----------------------------------------------------------------------------
+
+/// The distribution's name and what the system tools missing here install with: `ID` and
+/// `ID_LIKE` of `/etc/os-release` name the family (Arch, Debian/Ubuntu/Mint, Fedora,
+/// openSUSE), `PRETTY_NAME` is the report's name.
+fn distro(parse_text: &str) -> (String, &'static str) {
+    let field = |key: &str| -> Option<String> {
+        parse_text.lines().find_map(|line| {
+            let rest = line.strip_prefix(&format!("{key}="))?;
+            let rest = rest.strip_prefix('"').unwrap_or(rest);
+            Some(rest.strip_suffix('"').unwrap_or(rest).to_owned())
+        })
+    };
+    let name = field("PRETTY_NAME").unwrap_or_else(|| "Linux".to_owned());
+    let id = field("ID").unwrap_or_default().to_ascii_lowercase();
+    let like = field("ID_LIKE").unwrap_or_default().to_ascii_lowercase();
+    let install = if id.contains("arch") || like.contains("arch") {
+        "sudo pacman -S"
+    } else if id.contains("fedora")
+        || id.contains("rhel")
+        || like.contains("fedora")
+        || like.contains("rhel")
+    {
+        "sudo dnf install"
+    } else if id.contains("suse") || like.contains("suse") {
+        "sudo zypper install"
+    } else if id.contains("debian") || id.contains("ubuntu") || like.contains("debian") {
+        "sudo apt install"
+    } else {
+        "install"
+    };
+    (name, install)
+}
+
+/// The package of `tool` under the package manager: the names differ per family only where
+/// history did (`libcap-progs` on openSUSE, `libcap` elsewhere).
+fn package(tool: &str, install: &str) -> String {
+    match tool {
+        "nft" => "nftables".to_owned(),
+        "getcap" | "setcap" if install.contains("zypper") => "libcap-progs".to_owned(),
+        "getcap" | "setcap" => "libcap".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+/// The tools a `doctor` relies on (`nft` for the queue, `curl` for the checks, `getcap`/`setcap`
+/// for the engine's rights): each missing one is a problem, and the report carries this Linux'
+/// exact install command.
+fn deps_diag(issues: &mut Vec<Issue>) -> (String, DepsDiag) {
+    let (name, install) = distro(&std::fs::read_to_string("/etc/os-release").unwrap_or_default());
+    let missing: Vec<String> = ["nft", "curl", "getcap", "setcap"]
+        .iter()
+        .filter(|tool| zapret::root::which(tool).is_none())
+        .map(|tool| tool.to_string())
+        .collect();
+    let install_command = (!missing.is_empty()).then(|| {
+        let mut packages: Vec<String> = Vec::new();
+        for tool in &missing {
+            let pkg = package(tool, install);
+            if !packages.contains(&pkg) {
+                packages.push(pkg);
+            }
+        }
+        format!("{install} {}", packages.join(" "))
+    });
+    if let Some(command) = &install_command {
+        issue(
+            issues,
+            format!(
+                "the tools are missing: {} — the {name} way is `{command}`",
+                missing.join(", ")
+            ),
+            None,
+        );
+    }
+    (
+        name,
+        DepsDiag {
+            missing,
+            install_command,
+        },
+    )
+}
+
+/// `/proc/net/netfilter/nfnetlink_queue` exists: the module that owns the queue is in the
+/// kernel. On a system without the queue file at all (`cfg(not(unix))`) nothing is asked.
+fn kernel_nfqueue() -> bool {
+    #[cfg(unix)]
+    {
+        std::path::Path::new(QUEUE_FILE).exists()
+    }
+    #[cfg(not(unix))]
+    true
+}
+
 // --- fix -------------------------------------------------------------------------------------------------
 
 /// One remedy of the report: what `[Исправить]` and `zapret-hub-cli fix <target>` run, answered
@@ -906,19 +1056,88 @@ pub fn fix(app: &AppHandle, action: FixAction) -> anyhow::Result<()> {
         FixAction::RestoreService => fix_restore_service(app),
         FixAction::RepairBins => fix_repair_bins(app),
         FixAction::KillConflicts => fix_kill_conflicts(),
+        FixAction::EnableTcpTimestamps => fix_tcp_timestamps(),
+        FixAction::LoadKernelModules => fix_kernel_modules(),
     }
 }
 
-/// The system resolver goes plain and public: a drop-in config and a restart, then the caches go.
+/// The system resolver goes plain and public, whatever resolver system this distribution runs:
+/// systemd-resolved gets a drop-in, NetworkManager a conf and a reload, a bare `/etc/resolv.conf`
+/// a backup and two nameservers. The caches go afterwards.
 fn fix_system_dns() -> anyhow::Result<()> {
-    zapret::root::write(Path::new(RESOLVED_CONF), RESOLVED_CONFIG)?;
-    // Best effort: resolved may be absent or masked on a system whose stub works otherwise.
-    if let Err(err) =
-        zapret::root::run("systemctl", &["restart", "systemd-resolved"]).and_then(|out| out.check())
-    {
-        log::warn!("systemd-resolved did not restart: {err:#}");
+    if unit_active("systemd-resolved") {
+        zapret::root::write(Path::new(RESOLVED_CONF), RESOLVED_CONFIG)?;
+        if let Err(err) = zapret::root::run("systemctl", &["restart", "systemd-resolved"])
+            .and_then(|out| out.check())
+        {
+            // Best effort: resolved may refuse one restart while the drop-in still binds it.
+            log::warn!("systemd-resolved did not restart: {err:#}");
+        }
+    } else if unit_active("NetworkManager") {
+        const NM_CONF: &str = "/etc/NetworkManager/conf.d/99-zapret-dns.conf";
+        const NM_CONFIG: &str = "[main]\ndns=default\n[global-dns-domain-*]\nservers=77.88.8.8,77.88.8.1,8.8.8.8,1.1.1.1\n";
+        // NM rejects a config it does not own the style of: the plain write still binds it.
+        if let Err(err) =
+            zapret::root::write(Path::new(NM_CONF), NM_CONFIG).and_then(|()| {
+                zapret::root::run("nmcli", &["general", "reload"]).and_then(|out| out.check())
+            })
+        {
+            log::warn!("NetworkManager did not take the DNS conf: {err:#}");
+        }
+    } else {
+        const BACKUP: &str = "/etc/resolv.conf.zapret-bak";
+        if Path::new(RESOLV_CONF).exists() {
+            // Best effort: a missing backup is not fatal.
+            let _ = zapret::root::run("cp", &["-f", RESOLV_CONF, BACKUP]);
+        }
+        zapret::root::write(
+            Path::new(RESOLV_CONF),
+            "nameserver 77.88.8.8\nnameserver 8.8.8.8\n",
+        )?;
     }
     zapret::hosts::flush_dns()?;
+    Ok(())
+}
+
+/// `systemctl is-active` answers «active»: the unit is up this moment.
+fn unit_active(unit: &str) -> bool {
+    exec::run(
+        Command::new("systemctl").args(["is-active", unit]),
+        Duration::from_secs(5),
+        None,
+    )
+    .map(|out| out.stdout.trim() == "active")
+    .unwrap_or(false)
+}
+
+/// The TCP timestamps sysctl goes on now and stays on after the next boot.
+fn fix_tcp_timestamps() -> anyhow::Result<()> {
+    service::enable_tcp_timestamps()?;
+    // Best effort: the running kernel has it already, the persisting file is the second step.
+    if let Err(err) = zapret::root::write(
+        Path::new("/etc/sysctl.d/99-zapret-timestamps.conf"),
+        "net.ipv4.tcp_timestamps = 1\n",
+    ) {
+        log::warn!("cannot persist net.ipv4.tcp_timestamps: {err:#}");
+    }
+    Ok(())
+}
+
+/// The queue's kernel modules go in; the queue file afterwards is the only truth.
+fn fix_kernel_modules() -> anyhow::Result<()> {
+    let modprobe = zapret::root::which("modprobe").unwrap_or("modprobe".to_owned());
+    for module in ["nfnetlink_queue", "nft_queue"] {
+        if let Err(err) = zapret::root::run(&modprobe, &[module]) {
+            // `nft_queue` exists on fewer kernels: one silence is no failure.
+            log::warn!("modprobe {module} answered: {err:#}");
+        }
+    }
+    anyhow::ensure!(
+        kernel_nfqueue(),
+        "the nfnetlink_queue module did not appear in {QUEUE_FILE}: this kernel may miss the \
+         module — check /etc/kernel and the headers"
+    );
+    log::info!("the nfnetlink_queue module is in the kernel now");
     Ok(())
 }
 
@@ -1083,14 +1302,53 @@ pub fn probe(app: &AppHandle, target: &str) -> ProbeResult {
     let (host, url) = url_and_host(target);
     let resolved_ips = resolve(&host);
     let matching = matching(&actions::state(app), &host, &resolved_ips);
+    // The queue's counters before the checks: the difference after is what actually got queued.
+    let before = queue_counters();
     let checks = checks(&url, &host);
+    let after = queue_counters();
+    let intercepted_packets = match (before, after) {
+        (Some(before), Some(after)) => Some(after.saturating_sub(before).min(u32::MAX as u64) as u32),
+        _ => None,
+    };
     ProbeResult {
         host,
         url,
         resolved_ips,
         matching,
         checks,
+        intercepted_packets,
     }
+}
+
+/// The sum of `counter packets N` of every rule that sends to `queue num QNUM` (`nft list table
+/// inet zapret_hub`): `None` when the table does not answer or carries no counters.
+fn queue_counters() -> Option<u64> {
+    rule_packets(&table_text()?)
+}
+
+/// `counter packets N` added up over the queue rules of `{QNUM}`: `nft` lists them as
+/// `queue num 200` when created and `queue flags bypass to 200` when printed. `None` when none
+/// of them carries a counter.
+fn rule_packets(text: &str) -> Option<u64> {
+    let kinds = [format!("num {QNUM}"), format!("flags bypass to {QNUM}")];
+    let mut sum = None;
+    for line in text.lines() {
+        if !line.contains("queue") || !kinds.iter().any(|kind| line.contains(kind.as_str())) {
+            continue;
+        }
+        let Some(counter) = line.find("counter packets ") else {
+            continue;
+        };
+        let digits = line[(counter + "counter packets ".len())..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        let taken = digits.parse::<u64>().ok();
+        if let Some(taken) = taken {
+            sum = Some(sum.unwrap_or(0) + taken);
+        }
+    }
+    sum
 }
 
 /// The host behind a domain or URL and the URL itself: the scheme is https by default, userinfo
@@ -1332,8 +1590,44 @@ mod tests {
     }
 
     #[test]
-    fn donors_come_from_the_table_then_the_stem() {
-        assert_eq!(donor_candidates("stun2.bin"), ["stun.bin"]);
+    fn the_queue_counters_add_up_only_for_queue_rules() {
+        assert_eq!(rule_packets(""), None);
+        assert_eq!(
+            rule_packets("        counter packets 0 bytes 0 return"),
+            None,
+            "a rule without the queue is nobody's packet"
+        );
+        // As the table file writes it (`queue num 200`).
+        let rule = "tcp dport {{ {tcp_ports} }} ct original packets 1-12 counter packets 5 bytes 600 queue num 200 bypass";
+        assert_eq!(rule_packets(rule), Some(5));
+        // As nft prints it back (`queue flags bypass to 200`).
+        let listed = "tcp dport { 80, 443 } ct original packets 1-12 counter packets 48 bytes 13738 queue flags bypass to 200";
+        assert_eq!(rule_packets(listed), Some(48));
+        let two = "udp dport { 53 } counter packets 3 bytes 100 queue flags bypass to 200\n\
+                   udp dport { 443 } counter packets 9 bytes 900 queue flags bypass to 200";
+        assert_eq!(rule_packets(two), Some(12));
+    }
+
+    #[test]
+    fn a_distro_names_its_package_manager() {
+        assert_eq!(distro("PRETTY_NAME=\"Arch Linux\"\nID=arch\n"), ("Arch Linux".to_owned(), "sudo pacman -S"));
+        assert_eq!(distro("ID=cachyos\nID_LIKE=arch"), ("Linux".to_owned(), "sudo pacman -S"));
+        assert_eq!(distro("ID=ubuntu\nID_LIKE=debian\nPRETTY_NAME=\"Ubuntu 24.04\"\n"), ("Ubuntu 24.04".to_owned(), "sudo apt install"));
+        assert_eq!(distro("ID=opensuse-tumbleweed\n"), ("Linux".to_owned(), "sudo zypper install"));
+        assert_eq!(distro("ID=fedora\nPRETTY_NAME=\"Fedora Linux\"\n"), ("Fedora Linux".to_owned(), "sudo dnf install"));
+        assert_eq!(distro("ID=someos"), ("Linux".to_owned(), "install"));
+    }
+
+    #[test]
+    fn the_missing_tools_name_their_packages() {
+        assert_eq!(package("nft", "sudo pacman -S"), "nftables");
+        assert_eq!(package("getcap", "sudo zypper install"), "libcap-progs");
+        assert_eq!(package("setcap", "sudo apt install"), "libcap");
+        assert_eq!(package("curl", "sudo dnf install"), "curl");
+    }
+
+    #[test]
+    fn donors_come_from_the_table_then_the_stem() {        assert_eq!(donor_candidates("stun2.bin"), ["stun.bin"]);
         assert_eq!(
             donor_candidates("quic_initial_4pda_to.bin"),
             ["quic_initial_www_google_com.bin"]
