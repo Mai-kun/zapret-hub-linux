@@ -121,6 +121,29 @@ fn queue_text() -> Option<String> {
     (out.success() && !out.stdout.is_empty()).then(|| out.stdout)
 }
 
+/// Ends one pid (SIGKILL), waiting until it is gone: only its handles are waited for, not other
+/// processes of the same image.
+pub fn kill(pid: u32) -> anyhow::Result<()> {
+    let started = Instant::now();
+    loop {
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let Some(proc) = system.processes().get(&sysinfo::Pid::from_u32(pid)) else {
+            return Ok(()); // already gone, or never was
+        };
+        proc.kill();
+        anyhow::ensure!(
+            started.elapsed() < Duration::from_secs(10),
+            "pid {pid} is still running 10 s after the kill"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Starts a process from a snapshot again, without a window, not waiting for it. It gets no
 /// standard handles: a long-lived winws must not hold a pipe of ours open.
 pub fn spawn_detached(proc: &Proc) -> anyhow::Result<()> {

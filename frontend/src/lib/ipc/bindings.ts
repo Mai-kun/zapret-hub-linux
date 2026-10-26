@@ -109,6 +109,16 @@ export const commands = {
 	doctor: () => typedError<DoctorReport, string>(__TAURI_INVOKE("doctor")),
 	/**  `probe` of one domain or URL: DNS, the lists, the routing rule, HTTP/TLS and a ping. */
 	probe: (target: string) => typedError<ProbeResult, string>(__TAURI_INVOKE("probe", { target })),
+	/**
+	 *  One remedy of `doctor`: the action runs, then the report is taken again so the page can drop
+	 *  the issue it just fixed (and show what is left).
+	 */
+	fixDoctorIssue: (action: FixAction) => typedError<DoctorReport, string>(__TAURI_INVOKE("fix_doctor_issue", { action })),
+	/**
+	 *  Every fixable issue of a fresh `doctor`, one after another; what a fix could not cure comes
+	 *  back in the report, the anchors fail loudly.
+	 */
+	fixAllDoctorIssues: () => typedError<DoctorReport, string>(__TAURI_INVOKE("fix_all_doctor_issues")),
 	/**  The editor's checks as it types: nothing saved. */
 	validateRoute: (rule: Rule) => __TAURI_INVOKE<FieldError[]>("validate_route", { rule }),
 	/**  `ips` and `domains` plus the entries of a list file (one subnet or domain per line). */
@@ -249,6 +259,7 @@ export type DirectReason = { kind: "ProxyDown" } | { kind: "AuthRequired" } | { 
 
 /**  Everything at once; `issues` is what to fix and how, empty when it all looks healthy. */
 export type DoctorReport = {
+	system_dns: SystemDnsDiag,
 	engine: EngineDiag,
 	lists_and_bins: ListsAndBins,
 	service: ServiceDiag,
@@ -256,7 +267,7 @@ export type DoctorReport = {
 	nftables: NftDiag,
 	conflicts: Conflicts,
 	proxies: ProxiesDiag,
-	issues: string[],
+	issues: Issue[],
 };
 
 /**  A release download from the window: bytes so far and the zip's size (0 when GitHub gave none). */
@@ -329,6 +340,26 @@ export type FieldError = {
 	message: string,
 };
 
+/**
+ *  An automatic remedy of one problem `doctor` found: `fix_doctor_issue` runs it, `doctor --fix`
+ *  runs all of them, then the report is taken again.
+ */
+export type FixAction = 
+/**
+ *  The system resolver does not answer while a plain UDP query of a public resolver does:
+ *  `/etc/systemd/resolved.conf.d/99-zapret-dns.conf` is written and the caches are flushed.
+ */
+{ kind: "fix_system_dns" } | 
+/**
+ *  An unfinished operation (`pending.json`) or a set strategy without its service back:
+ *  the snapshot is restored or the strategy applied again.
+ */
+{ kind: "restore_service" } | 
+/**  Empty or missing `.bin` files of the bin folder: a non-empty donor is copied over them. */
+{ kind: "repair_bins" } | 
+/**  Outside engine processes and foreign `zapret*` nftables: they take the queue's packets. */
+{ kind: "kill_conflicts" };
+
 export type FlowRow = {
 	protocol: string,
 	domain: string | null,
@@ -368,6 +399,12 @@ export type Info = {
 	compat: number | null,
 	/**  Why the folder cannot be used. */
 	error: string | null,
+};
+
+/**  One problem and its remedy: `text` is what is wrong, `fix` is what `[Исправить]` runs. */
+export type Issue = {
+	text: string,
+	fix: FixAction | null,
 };
 
 export type LastResult = {
@@ -744,6 +781,17 @@ export type StrategyRow = {
 export type Suite = "Standard" | "Dpi";
 
 export type SvcState = "NotInstalled" | "Stopped" | "StartPending" | "StopPending" | "Running" | "Other";
+
+/**
+ *  The system DNS against a public resolver: the resolver of `/etc/resolv.conf` answers, and a
+ *  plain UDP query of `DNS_SERVERS` does.
+ */
+export type SystemDnsDiag = {
+	/**  The system resolver answered within the budget. */
+	system_ok: boolean,
+	/**  Any public resolver answered directly over UDP 53. */
+	direct_ok: boolean,
+};
 
 export type TargetResult = {
 	name: string,

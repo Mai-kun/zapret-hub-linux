@@ -485,6 +485,46 @@ pub fn doctor(handle: AppHandle) -> Answer<diag::DoctorReport> {
     Ok(diag::doctor(&handle))
 }
 
+/// One remedy of `doctor`: the action runs, then the report is taken again so the page can drop
+/// the issue it just fixed (and show what is left).
+#[tauri::command]
+#[specta::specta]
+pub async fn fix_doctor_issue(
+    handle: AppHandle,
+    action: diag::FixAction,
+) -> Answer<diag::DoctorReport> {
+    blocking(move || {
+        diag::fix(&handle, action)?;
+        actions::changed(&handle);
+        Ok(diag::doctor(&handle))
+    })
+    .await
+}
+
+/// Every fixable issue of a fresh `doctor`, one after another; what a fix could not cure comes
+/// back in the report, the anchors fail loudly.
+#[tauri::command]
+#[specta::specta]
+pub async fn fix_all_doctor_issues(handle: AppHandle) -> Answer<diag::DoctorReport> {
+    blocking(move || {
+        let report = diag::doctor(&handle);
+        let mut actions = Vec::new();
+        for fix in report.issues.iter().filter_map(|issue| issue.fix) {
+            if !actions.contains(&fix) {
+                actions.push(fix);
+            }
+        }
+        for action in actions {
+            if let Err(err) = diag::fix(&handle, action) {
+                log::warn!("fix {action:?} failed: {err:#}");
+            }
+        }
+        actions::changed(&handle);
+        Ok(diag::doctor(&handle))
+    })
+    .await
+}
+
 /// `probe` of one domain or URL: DNS, the lists, the routing rule, HTTP/TLS and a ping.
 #[tauri::command]
 #[specta::specta]

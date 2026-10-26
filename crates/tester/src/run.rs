@@ -215,6 +215,9 @@ fn run_strategies(
     cancel: &AtomicBool,
     progress: &(dyn Fn(Progress) + Sync),
 ) -> anyhow::Result<Vec<StrategyResult>> {
+    // DNS first, while the bypass still works: a resolver that needs it (EAI_AGAIN) must answer
+    // now, not after zapret is gone, and even then never longer than DNS_WARM.
+    warm_dns(work, cancel);
     // Both engines: a run may mix them (zapret2 spec 7).
     zapret::service::stop(SERVICE2)?;
     stop_engines()?;
@@ -224,7 +227,6 @@ fn run_strategies(
     {
         log::warn!("TCP timestamps stay off for the tests: {err:#}");
     }
-    warm_dns(work);
     let total = request.strategies.len() as u32;
     let mut done: Vec<Vec<StrategyResult>> = vec![Vec::new(); request.strategies.len()];
     // N whole passes over the list, not N runs of one strategy back to back: the network drifts
@@ -285,11 +287,17 @@ pub fn whole_passes(mut done: Vec<Vec<StrategyResult>>) -> Vec<Vec<StrategyResul
     done
 }
 
+/// The hard budget of all the warm lookups together: past it the run starts anyway and the first
+/// strategy's curl pays what is left of the lookup.
+const DNS_WARM: Duration = Duration::from_secs(1);
+
 /// curl's `time_total` includes the name lookup, and Windows caches names for every process: the
-/// first strategy to ask would pay it alone. Resolved once here, with neither engine running.
-/// ponytail: an entry whose TTL ends mid-run is looked up again by whichever strategy runs then;
-/// repeats spread that.
-fn warm_dns(work: &Work) {
+/// first strategy to ask would pay it alone. Resolved once here, while the bypass still works: a
+/// system resolver that needs it would never answer after the engines stopped (the hang this
+/// replaces). `to_socket_addrs` cannot be timed out, so the lookups are detached threads and the
+/// wait is bounded by DNS_WARM and `cancel` instead: warm_dns never holds a test start or cancel.
+/// ponytail: a wedged `getaddrinfo` thread finishes whenever the resolver does, in the background.
+fn warm_dns(work: &Work, cancel: &AtomicBool) {
     use std::net::ToSocketAddrs as _;
     let hosts: Vec<String> = match work {
         Work::Standard(targets) => targets
@@ -299,9 +307,34 @@ fn warm_dns(work: &Work) {
             .collect(),
         Work::Dpi(targets, _) => targets.iter().map(|t| t.host.clone()).collect(),
     };
-    par_map(&hosts, parallelism(), |host| {
-        let _ = (host.as_str(), 443).to_socket_addrs();
-    });
+    if hosts.is_empty() {
+        return;
+    }
+    let (send, recv) = std::sync::mpsc::channel::<()>();
+    for host in hosts {
+        let send = send.clone();
+        let _ = std::thread::Builder::new()
+            .name("warm-dns".into())
+            .spawn(move || {
+                let _ = (host.as_str(), 443).to_socket_addrs();
+                let _ = send.send(());
+            });
+    }
+    drop(send); // a disconnect means every lookup finished
+    let deadline = std::time::Instant::now() + DNS_WARM;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match recv.recv_timeout(left) {
+            Ok(()) => {}
+            Err(_) => break, // all done, or the budget is over
+        }
+    }
 }
 
 /// How a strategy starts: the program, its working folder, the arguments and their hash, and for

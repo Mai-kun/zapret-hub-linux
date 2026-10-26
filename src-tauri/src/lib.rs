@@ -101,6 +101,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::route_flows,
             commands::doctor,
             commands::probe,
+            commands::fix_doctor_issue,
+            commands::fix_all_doctor_issues,
             commands::validate_route,
             commands::import_route_lines
         ])

@@ -110,8 +110,15 @@ enum Command {
     Nft,
     /// The system's DNS cache flushed.
     DnsFlush,
-    /// Whole-state self-diagnostics: every subsystem, problems in one report.
-    Doctor,
+    /// Whole-state self-diagnostics: every subsystem, problems in one report; `--fix` repairs
+    /// what can be repaired first, then prints the state again.
+    Doctor {
+        /// Run every automatic remedy of `doctor` before printing the report.
+        #[arg(long)]
+        fix: bool,
+    },
+    /// One remedy of `doctor`: what a problem of `doctor` carries as its own fix.
+    Fix { target: FixTarget },
     /// A domain (`discord.com`) or URL (`https://gateway.discord.gg`): DNS, the lists it is in,
     /// the rule that takes it and its live checks.
     Probe { target: String },
@@ -317,6 +324,26 @@ enum ExclusionList {
     Domains,
     Ips,
     Ports,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum FixTarget {
+    SystemDns,
+    RestoreService,
+    RepairBins,
+    KillConflicts,
+}
+
+/// The JSON the app's `FixAction` reads: the same names its serde tags carry.
+fn fix_action(target: FixTarget) -> Value {
+    json!({
+        "kind": match target {
+            FixTarget::SystemDns => "fix_system_dns",
+            FixTarget::RestoreService => "restore_service",
+            FixTarget::RepairBins => "repair_bins",
+            FixTarget::KillConflicts => "kill_conflicts",
+        }
+    })
 }
 
 #[derive(Debug, Subcommand)]
@@ -668,7 +695,15 @@ fn run(args: Cli, call: Call, note: Note) -> Result<Done, Fail> {
         Command::Service(ServiceCommand::Logs) => Request::ServiceLogs,
         Command::Nft => Request::NftRules,
         Command::DnsFlush => Request::FlushDns,
-        Command::Doctor => Request::Doctor,
+        Command::Doctor { fix } => {
+            if fix {
+                return Ok(Done::Json(call(Request::FixAllDoctorIssues)?));
+            }
+            Request::Doctor
+        }
+        Command::Fix { target } => Request::FixDoctorIssue {
+            action: fix_action(target),
+        },
         Command::Probe { target } => Request::ProbeTarget { target },
     };
     // A command without a result answers `null`: an explicit ok then.
@@ -1255,6 +1290,31 @@ mod tests {
             (&["nft"], Request::NftRules),
             (&["dns-flush"], Request::FlushDns),
             (&["doctor"], Request::Doctor),
+            (&["doctor", "--fix"], Request::FixAllDoctorIssues),
+            (
+                &["fix", "system-dns"],
+                Request::FixDoctorIssue {
+                    action: fix_action(FixTarget::SystemDns),
+                },
+            ),
+            (
+                &["fix", "restore-service"],
+                Request::FixDoctorIssue {
+                    action: fix_action(FixTarget::RestoreService),
+                },
+            ),
+            (
+                &["fix", "repair-bins"],
+                Request::FixDoctorIssue {
+                    action: fix_action(FixTarget::RepairBins),
+                },
+            ),
+            (
+                &["fix", "kill-conflicts"],
+                Request::FixDoctorIssue {
+                    action: fix_action(FixTarget::KillConflicts),
+                },
+            ),
             (
                 &["probe", "https://discord.com"],
                 Request::ProbeTarget {

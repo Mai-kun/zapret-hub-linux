@@ -8,6 +8,7 @@
   import Strategies from "./tabs/Strategies.svelte";
   import Tests from "./tabs/Tests.svelte";
   import Zapret from "./tabs/Zapret.svelte";
+  import Diagnostics from "./tabs/Diagnostics.svelte";
   import Wizard from "./Wizard.svelte";
   import { app, refreshOverview, start, type Tab } from "$lib/app.svelte";
   import { S } from "$lib/strings";
@@ -17,6 +18,7 @@
     { id: "strategies", label: S.tabs.strategies, view: Strategies },
     { id: "tests", label: S.tabs.tests, view: Tests },
     { id: "zapret", label: S.tabs.zapret, view: Zapret },
+    { id: "diagnostics", label: S.tabs.diagnostics, view: Diagnostics },
     { id: "routes", label: S.tabs.routes, view: Routes },
     { id: "settings", label: S.tabs.settings, view: Settings },
   ] satisfies { id: Tab; label: string; view: unknown }[];

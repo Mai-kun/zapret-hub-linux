@@ -1,11 +1,12 @@
 //! `doctor` and `probe`: the whole state of every subsystem in one answer, and a live check of
 //! one target — what an agent reads in one go instead of hunting through the window.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::Path;
 use std::process::Command;
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use probe::curl::{self, CheckKind, CheckResult, CheckStatus};
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,27 @@ const FWMARK: &str = "0x40000000";
 /// The queue `zapret2::nft::table` fills and `nfqws2 --qnum=` binds.
 const QNUM: u32 = zapret2::nft::QNUM;
 const QUEUE_FILE: &str = "/proc/net/netfilter/nfnetlink_queue";
+
+/// The system DNS gets this long to answer: a dead resolver would hang forever, and only hosts
+/// whose resolution the bypass makes possible matter.
+const DNS_BUDGET: Duration = Duration::from_millis(1500);
+/// The domains a system resolver must answer for `doctor` to call it working: blocked targets
+/// would not resolve either, so the check only asks for what any resolver answers.
+const DNS_HOSTS: [&str; 2] = ["discord.com", "ya.ru"];
+/// Public resolvers a direct UDP query still reaches while the system one does not: the fix's
+/// config names them.
+const DNS_SERVERS: [&str; 2] = ["77.88.8.8:53", "8.8.8.8:53"];
+/// The drop-in the `FixSystemDns` fix writes: plain DNS, no failure of one server holds the rest.
+const RESOLVED_CONF: &str = "/etc/systemd/resolved.conf.d/99-zapret-dns.conf";
+const RESOLVED_CONFIG: &str =
+    "[Resolve]\nDNS=77.88.8.8 77.88.8.1 8.8.8.8 1.1.1.1\nDomains=~.\nDNSOverTLS=no\n";
+
+/// A `.bin` of the bin folder that holds nothing and its non-empty donor of the same content.
+const BIN_DONORS: &[(&str, &[&str])] = &[
+    ("stun2.bin", &["stun.bin"]),
+    ("quic_initial_4pda_to.bin", &["quic_initial_www_google_com.bin"]),
+    ("tls_clienthello_sochi_park.bin", &["tls_clienthello_max_ru.bin"]),
+];
 
 /// The engine: where it is, what it says, and whether the system lets it take packets.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
@@ -127,9 +149,44 @@ pub struct ProxiesDiag {
     pub tg_ws: TgWsDiag,
 }
 
+/// An automatic remedy of one problem `doctor` found: `fix_doctor_issue` runs it, `doctor --fix`
+/// runs all of them, then the report is taken again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum FixAction {
+    /// The system resolver does not answer while a plain UDP query of a public resolver does:
+    /// `/etc/systemd/resolved.conf.d/99-zapret-dns.conf` is written and the caches are flushed.
+    FixSystemDns,
+    /// An unfinished operation (`pending.json`) or a set strategy without its service back:
+    /// the snapshot is restored or the strategy applied again.
+    RestoreService,
+    /// Empty or missing `.bin` files of the bin folder: a non-empty donor is copied over them.
+    RepairBins,
+    /// Outside engine processes and foreign `zapret*` nftables: they take the queue's packets.
+    KillConflicts,
+}
+
+/// One problem and its remedy: `text` is what is wrong, `fix` is what `[Исправить]` runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+pub struct Issue {
+    pub text: String,
+    pub fix: Option<FixAction>,
+}
+
+/// The system DNS against a public resolver: the resolver of `/etc/resolv.conf` answers, and a
+/// plain UDP query of `DNS_SERVERS` does.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, specta::Type)]
+pub struct SystemDnsDiag {
+    /// The system resolver answered within the budget.
+    pub system_ok: bool,
+    /// Any public resolver answered directly over UDP 53.
+    pub direct_ok: bool,
+}
+
 /// Everything at once; `issues` is what to fix and how, empty when it all looks healthy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct DoctorReport {
+    pub system_dns: SystemDnsDiag,
     pub engine: EngineDiag,
     pub lists_and_bins: ListsAndBins,
     pub service: ServiceDiag,
@@ -137,7 +194,7 @@ pub struct DoctorReport {
     pub nftables: NftDiag,
     pub conflicts: Conflicts,
     pub proxies: ProxiesDiag,
-    pub issues: Vec<String>,
+    pub issues: Vec<Issue>,
 }
 
 /// A domain (`discord.com`) or URL (`https://gateway.discord.gg`): where it goes, what the
@@ -182,15 +239,18 @@ pub fn doctor(app: &AppHandle) -> DoctorReport {
     let settings = state.settings();
     let mut issues = Vec::new();
 
+    let system_dns = system_dns(&mut issues);
     let opened = state.engine2();
     let service = service_diag(&settings, &mut issues);
     let (engine, opened) = engine_diag(opened, &mut issues);
     let lists_and_bins = lists_and_bins(&opened, &service, &mut issues);
     let nfqueue = nfqueue(&service, &mut issues);
-    let nftables = nftables(&mut issues);
+    let nftables = nftables(&service, &mut issues);
     let conflicts = conflicts(&service, &mut issues);
     let proxies = proxies(app, &settings, &mut issues);
+    restore_service(&state, &mut issues);
     DoctorReport {
+        system_dns,
         engine,
         lists_and_bins,
         service,
@@ -202,15 +262,137 @@ pub fn doctor(app: &AppHandle) -> DoctorReport {
     }
 }
 
+/// A helper that keeps the remedy attached to its text: `fix` is None for what only advice can
+/// repair.
+fn issue(issues: &mut Vec<Issue>, text: String, fix: Option<FixAction>) {
+    issues.push(Issue { text, fix });
+}
+
+/// The system resolver now, and a public one the query reaches directly: when only the direct
+/// answer comes, the `FixSystemDns` fix makes the system resolver plain again.
+fn system_dns(issues: &mut Vec<Issue>) -> SystemDnsDiag {
+    let hosts: Vec<String> = DNS_HOSTS.iter().map(|host| host.to_string()).collect();
+    let system_ok = resolves(&hosts, DNS_BUDGET);
+    let direct_ok = DNS_SERVERS.iter().any(|server| udp_dns_ok(server, DNS_BUDGET));
+    if !system_ok && direct_ok {
+        issue(
+            issues,
+            format!(
+                "the system DNS resolver does not answer while a direct UDP query of a public \
+                 resolver does: `fix` writes {RESOLVED_CONF} (the DNS servers above, plain no \
+                 DoT) and restarts systemd-resolved"
+            ),
+            Some(FixAction::FixSystemDns),
+        );
+    }
+    SystemDnsDiag {
+        system_ok,
+        direct_ok,
+    }
+}
+
+/// Whether any host of `hosts` resolves within `budget`. `to_socket_addrs` cannot be timed out,
+/// so the lookups are detached threads and the wait is bounded instead. One "yes" is one: the
+/// resolver answers, and it does not owe the rest faster than the deadline.
+fn resolves(hosts: &[String], budget: Duration) -> bool {
+    use std::net::ToSocketAddrs as _;
+    let (send, recv) = mpsc::channel::<bool>();
+    for host in hosts {
+        let send = send.clone();
+        let host = host.clone(); // owned: the lookups are detached
+        let _ = thread::Builder::new()
+            .name("dns-check".into())
+            .spawn(move || {
+                let _ = send.send((host.as_str(), 443).to_socket_addrs().is_ok());
+            });
+    }
+    drop(send); // a disconnect means every lookup finished
+    let deadline = Instant::now() + budget;
+    let mut ok = false;
+    for _ in 0..hosts.len() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match recv.recv_timeout(left) {
+            Ok(answered) if answered => {
+                ok = true;
+                break;
+            }
+            Ok(_) => {} // this host is unknown to nobody, the next one may come
+            Err(_) => break, // all lookups done, or the budget ran out
+        }
+    }
+    ok
+}
+
+/// A plain UDP DNS query (an A record) reaches `server` (`8.8.8.8:53`) and comes back answered.
+/// The timeouts bound every step, so a hung network cannot hold the check longer than `2 × budget`.
+fn udp_dns_ok(server: &str, budget: Duration) -> bool {
+    thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
+                    return false;
+                };
+                let _ = socket.set_read_timeout(Some(budget));
+                let _ = socket.set_write_timeout(Some(budget));
+                if socket.connect(server).is_err() {
+                    return false;
+                }
+                let query = dns_query(0x1234u16, "discord.com");
+                let mut answer = [0u8; 512];
+                socket.send(&query).is_ok()
+                    && socket.recv(&mut answer).is_ok_and(|len| {
+                        // The answer's id matches and it says NOERROR with at least one record.
+                        len >= 12
+                            && answer[0] == query[0]
+                            && answer[1] == query[1]
+                            && answer[3] & 0x0F == 0
+                            && (answer[6], answer[7]) != (0, 0)
+                    })
+            })
+            .join()
+            .unwrap_or(false) // a panicked check did not reach the resolver either
+    })
+}
+
+/// An A query of `name` framed as RFC 1035 says: the fixed id, one question, labels, A, IN.
+fn dns_query(id: impl Into<u16>, name: &str) -> Vec<u8> {
+    let id = id.into();
+    let mut out = vec![0u8; 12];
+    out[0] = (id >> 8) as u8;
+    out[1] = id as u8;
+    out[2] = 0x01; // RD: the answer may come from a cache
+    out[5] = 1; // one question
+    for label in name.trim_end_matches('.').split('.') {
+        out.push(label.len() as u8);
+        out.extend(label.as_bytes());
+    }
+    out.push(0); // the root
+    out.extend([0, 1, 0, 1]); // type A, class IN
+    out
+}
+
 /// The `zapret2` service as the overview shows it, with its strategy and the game filter in force.
-fn service_diag(settings: &Settings, issues: &mut Vec<String>) -> ServiceDiag {
+fn service_diag(settings: &Settings, issues: &mut Vec<Issue>) -> ServiceDiag {
     let (name, _) = service::active();
     let state = service::state(name);
     if state != SvcState::Running {
-        issues.push(format!(
-            "the {name} service is {state:?}: apply a strategy (`zapret-hub-cli apply <name>` \
-             or `zapret-hub-cli apply-best`)"
-        ));
+        // A strategy recorded but no service is what an interrupted test or apply leaves:
+        // `RestoreService` applies it again; nothing set means only advice can repair it.
+        let fix = service::strategy().map(|_| FixAction::RestoreService);
+        let remedy = match fix {
+            Some(_) => ": `fix` applies it again".to_owned(),
+            None => format!(
+                ": apply a strategy (`zapret-hub-cli apply <name>` or `zapret-hub-cli apply-best`)"
+            ),
+        };
+        issue(
+            issues,
+            format!("the {name} service is {state:?}{remedy}"),
+            fix,
+        );
     }
     ServiceDiag {
         name: name.to_owned(),
@@ -220,21 +402,46 @@ fn service_diag(settings: &Settings, issues: &mut Vec<String>) -> ServiceDiag {
     }
 }
 
+/// A `pending.json` left behind means an unfinished operation: only its restore (or a fresh
+/// apply of the strategy) puts the state back. A set strategy without its service or table is
+/// reported by `service_diag` and `nftables`, with the same fix.
+fn restore_service(state: &AppState, issues: &mut Vec<Issue>) {
+    let pending = zapret::snapshot::pending_path(&state.paths.data());
+    match zapret::snapshot::Snapshot::load(&pending) {
+        Ok(Some(_)) => issue(
+            issues,
+            format!(
+                "{} holds an unfinished operation: its state was not put back — `fix` restores it",
+                pending.display()
+            ),
+            Some(FixAction::RestoreService),
+        ),
+        Err(err) => issue(
+            issues,
+            format!("{err:#}"),
+            None, // a broken pending.json cannot be auto-restored: a human decides (snapshot spec)
+        ),
+        Ok(None) => {}
+    }
+}
+
 /// The engine, its rights and its capabilities; each refusal becomes the remedy next to it.
 fn engine_diag(
     engine: anyhow::Result<Option<Engine>>,
-    issues: &mut Vec<String>,
+    issues: &mut Vec<Issue>,
 ) -> (EngineDiag, Option<Engine>) {
     let engine = match engine {
         Ok(Some(engine)) => engine,
         Ok(None) => {
-            issues.push(
+            issue(
+                issues,
                 "the zapret2 folder is not set: choose it in Zapret Hub → Settings".to_owned(),
+                None,
             );
             return (empty_engine(None), None);
         }
         Err(err) => {
-            issues.push(format!("{err:#}"));
+            issue(issues, format!("{err:#}"), None);
             return (empty_engine(Some(format!("{err:#}"))), None);
         }
     };
@@ -243,19 +450,27 @@ fn engine_diag(
     let version = match engine.version() {
         Ok(version) => Some(version.text),
         Err(err) => {
-            issues.push(format!("{path}: {err:#}"));
+            issue(issues, format!("{path}: {err:#}"), None);
             None
         }
     };
     if engine.is_nfqws() {
         let (executable, cap_net_admin, cap_net_raw) = rights(exe);
         if !executable {
-            issues.push(format!("{path} cannot be executed: `sudo chmod +x {path}`"));
+            issue(
+                issues,
+                format!("{path} cannot be executed: `sudo chmod +x {path}`"),
+                None,
+            );
         } else if !(cap_net_admin && cap_net_raw) {
-            issues.push(format!(
-                "{path} misses capabilities (cap_net_admin {cap_net_admin}, cap_net_raw \
-                 {cap_net_raw}): `sudo setcap 'cap_net_admin,cap_net_raw=eip' {path}`"
-            ));
+            issue(
+                issues,
+                format!(
+                    "{path} misses capabilities (cap_net_admin {cap_net_admin}, cap_net_raw \
+                     {cap_net_raw}): `sudo setcap 'cap_net_admin,cap_net_raw=eip' {path}`"
+                ),
+                None,
+            );
         }
         (
             EngineDiag {
@@ -364,7 +579,7 @@ fn referenced_bins(text: &str) -> Vec<String> {
 fn lists_and_bins(
     engine: &Option<Engine>,
     service: &ServiceDiag,
-    issues: &mut Vec<String>,
+    issues: &mut Vec<Issue>,
 ) -> ListsAndBins {
     let Some(engine) = engine else {
         return ListsAndBins::default();
@@ -377,10 +592,14 @@ fn lists_and_bins(
         ("list-exclude-user.txt", count("list-exclude-user.txt")),
     ] {
         if count.is_none() {
-            issues.push(format!(
-                "{} is missing: the strategy would read nothing from it",
-                lists.join(file).display()
-            ));
+            issue(
+                issues,
+                format!(
+                    "{} is missing: the strategy would read nothing from it",
+                    lists.join(file).display()
+                ),
+                None,
+            );
         }
     }
     let active = active_text(engine, service.strategy.as_deref());
@@ -401,12 +620,16 @@ fn lists_and_bins(
             }
             let bytes = entry.metadata().map_or(0u32, |meta| meta.len() as u32);
             let used_by_active = referenced.iter().any(|used| used == &name);
-            if used_by_active && bytes == 0 {
-                issues.push(format!(
-                    "{} of the bin folder is empty and the active strategy sends it as a fake \
-                     or a blob: DPI would answer with an empty packet",
-                    bin.join(&name).display()
-                ));
+            if bytes == 0 {
+                let for_active = used_by_active
+                    .then(|| " and the active strategy sends it as a fake or a blob: DPI would \
+                               answer with an empty packet".to_owned())
+                    .unwrap_or_else(|| " and its donor can fill it in".to_owned());
+                issue(
+                    issues,
+                    format!("{} of the bin folder is empty{for_active}", bin.join(&name).display()),
+                    Some(FixAction::RepairBins),
+                );
             }
             bins.push(Bin {
                 name,
@@ -418,10 +641,14 @@ fn lists_and_bins(
     }
     for used in &referenced {
         if !bins.iter().any(|bin: &Bin| bin.name == *used) {
-            issues.push(format!(
-                "the active strategy loads {} of the bin folder, which is missing",
-                strategies::bin_dir(engine).join(used).display()
-            ));
+            issue(
+                issues,
+                format!(
+                    "the active strategy loads {} of the bin folder, which is missing",
+                    strategies::bin_dir(engine).join(used).display()
+                ),
+                Some(FixAction::RepairBins),
+            );
         }
     }
     ListsAndBins {
@@ -433,18 +660,24 @@ fn lists_and_bins(
 }
 /// The NFQUEUE: a line for our queue with an engine on it, or nobody there. Only a running
 /// service owes the queue; stopped, silence is normal.
-fn nfqueue(service: &ServiceDiag, issues: &mut Vec<String>) -> NfQueueDiag {
+fn nfqueue(service: &ServiceDiag, issues: &mut Vec<Issue>) -> NfQueueDiag {
     let state = queue_text().as_deref().and_then(parse_queue);
     if service.state == SvcState::Running {
         match state {
-            None => issues.push(format!(
-                "queue {QNUM} is not in the kernel's queue list: the nft table did not apply it \
-                 or the strategy named another --qnum"
-            )),
-            Some((0, _)) => issues.push(
+            None => issue(
+                issues,
+                format!(
+                    "queue {QNUM} is not in the kernel's queue list: the nft table did not apply \
+                     it or the strategy named another --qnum"
+                ),
+                None,
+            ),
+            Some((0, _)) => issue(
+                issues,
                 "the service runs but nobody holds its queue: nfqws2 did not bind it — see the \
                  journal (`zapret-hub-cli service logs`)"
                     .to_owned(),
+                None,
             ),
             _ => {}
         }
@@ -488,8 +721,10 @@ fn parse_queue(text: &str) -> Option<(u32, u32)> {
     None
 }
 
-/// The `inet zapret_hub` table as it is now: applied or not, and the two guards in place.
-fn nftables(issues: &mut Vec<String>) -> NftDiag {
+/// The `inet zapret_hub` table as it is now: applied or not, and the two guards in place. A
+/// missing table with a strategy applied (a service restart that lost its ExecStartPre) is what
+/// `RestoreService` repairs.
+fn nftables(service: &ServiceDiag, issues: &mut Vec<Issue>) -> NftDiag {
     #[cfg(unix)]
     {
         let text = table_text().unwrap_or_default();
@@ -497,16 +732,24 @@ fn nftables(issues: &mut Vec<String>) -> NftDiag {
         let fwmark = text.contains(FWMARK);
         let active = !text.trim().is_empty();
         if !active {
-            issues.push(
+            let fix = (service.state == SvcState::Running && service.strategy.is_some())
+                .then_some(FixAction::RestoreService);
+            issue(
+                issues,
                 "the nft table inet zapret_hub is not applied: nfqws2 gets no packets — restart \
                  the service, its ExecStartPre applies the table"
                     .to_owned(),
+                fix,
             );
         } else if !lo_skip || !fwmark {
-            issues.push(
+            issue(
+                issues,
                 "the nft table misses the `oifname \"lo\" or the nfqws2-mark rule: apply the \
                  strategy again, the unit's table file holds both"
                     .to_owned(),
+                service.strategy
+                    .is_some()
+                    .then_some(FixAction::RestoreService),
             );
         }
         return NftDiag {
@@ -517,7 +760,7 @@ fn nftables(issues: &mut Vec<String>) -> NftDiag {
     }
     // No nftables outside Unix; the queue does not exist there either.
     #[cfg(not(unix))]
-    let _ = issues;
+    let _ = (service, issues);
     #[cfg(not(unix))]
     NftDiag {
         active: false,
@@ -550,7 +793,7 @@ fn table_text() -> Option<String> {
 
 /// Outside engine processes and foreign zapret nftables: they each take the packets the queue
 /// should keep, so one engine at a time is the rule.
-fn conflicts(service: &ServiceDiag, issues: &mut Vec<String>) -> Conflicts {
+fn conflicts(service: &ServiceDiag, issues: &mut Vec<Issue>) -> Conflicts {
     let own = std::process::id();
     let service_pid = service::status(&service.name).map_or(0, |(_, pid)| pid);
     let mut processes = Vec::new();
@@ -559,11 +802,15 @@ fn conflicts(service: &ServiceDiag, issues: &mut Vec<String>) -> Conflicts {
             if proc.pid == service_pid || proc.pid == own {
                 continue; // the service's own engine, or this very app
             }
-            issues.push(format!(
-                "an outside {image} process runs, pid {}: it takes packets from the queue too — \
-                 end it or stop its service",
-                proc.pid
-            ));
+            issue(
+                issues,
+                format!(
+                    "an outside {image} process runs, pid {}: it takes packets from the queue \
+                     too — `kill-conflicts` ends it or its service does",
+                    proc.pid
+                ),
+                Some(FixAction::KillConflicts),
+            );
             processes.push(match &proc.exe {
                 Some(exe) => format!("{} (pid {})", exe.display(), proc.pid),
                 None => format!("{image} (pid {})", proc.pid),
@@ -581,25 +828,33 @@ fn conflicts(service: &ServiceDiag, issues: &mut Vec<String>) -> Conflicts {
             .collect();
     }
     for table in &tables {
-        issues.push(format!(
-            "the foreign nftables table {table} filters traffic together with Zapret Hub: delete \
-             or stop the tool that made it"
-        ));
+        issue(
+            issues,
+            format!(
+                "the foreign nftables table {table} filters traffic together with Zapret Hub: \
+                 `kill-conflicts` deletes it"
+            ),
+            Some(FixAction::KillConflicts),
+        );
     }
     Conflicts { processes, tables }
 }
 
 /// The two proxies: does the SOCKS5 in the settings answer, and tg-ws take its port.
-fn proxies(app: &AppHandle, settings: &Settings, issues: &mut Vec<String>) -> ProxiesDiag {
+fn proxies(app: &AppHandle, settings: &Settings, issues: &mut Vec<Issue>) -> ProxiesDiag {
     let socks = match &settings.socks5 {
         Some(addr) => {
             let status = probe::socks::check(addr);
             if !status.ok {
-                issues.push(format!(
-                    "the SOCKS5 proxy {addr} does not answer: {} — check that it runs and the \
-                     address holds, or clear it in Settings",
-                    status.error.as_deref().unwrap_or("no greeting")
-                ));
+                issue(
+                    issues,
+                    format!(
+                        "the SOCKS5 proxy {addr} does not answer: {} — check that it runs and the \
+                         address holds, or clear it in Settings",
+                        status.error.as_deref().unwrap_or("no greeting")
+                    ),
+                    None,
+                );
             }
             SocksDiag {
                 set: true,
@@ -620,10 +875,15 @@ fn proxies(app: &AppHandle, settings: &Settings, issues: &mut Vec<String>) -> Pr
     )
     .is_ok();
     if tg.installed && tg.running && !listening {
-        issues.push(format!(
-            "tg-ws-proxy runs but nothing listens on port {}: restart it (`zapret-hub-cli tg-ws on`)",
-            tg.port
-        ));
+        issue(
+            issues,
+            format!(
+                "tg-ws-proxy runs but nothing listens on port {}: restart it (`zapret-hub-cli \
+                 tg-ws on`)",
+                tg.port
+            ),
+            None,
+        );
     }
     ProxiesDiag {
         socks5: socks,
@@ -634,6 +894,186 @@ fn proxies(app: &AppHandle, settings: &Settings, issues: &mut Vec<String>) -> Pr
             listening,
         },
     }
+}
+
+// --- fix -------------------------------------------------------------------------------------------------
+
+/// One remedy of the report: what `[Исправить]` and `zapret-hub-cli fix <target>` run, answered
+/// by a fresh `doctor`.
+pub fn fix(app: &AppHandle, action: FixAction) -> anyhow::Result<()> {
+    match action {
+        FixAction::FixSystemDns => fix_system_dns(),
+        FixAction::RestoreService => fix_restore_service(app),
+        FixAction::RepairBins => fix_repair_bins(app),
+        FixAction::KillConflicts => fix_kill_conflicts(),
+    }
+}
+
+/// The system resolver goes plain and public: a drop-in config and a restart, then the caches go.
+fn fix_system_dns() -> anyhow::Result<()> {
+    zapret::root::write(Path::new(RESOLVED_CONF), RESOLVED_CONFIG)?;
+    // Best effort: resolved may be absent or masked on a system whose stub works otherwise.
+    if let Err(err) =
+        zapret::root::run("systemctl", &["restart", "systemd-resolved"]).and_then(|out| out.check())
+    {
+        log::warn!("systemd-resolved did not restart: {err:#}");
+    }
+    zapret::hosts::flush_dns()?;
+    Ok(())
+}
+
+/// The unfinished operation's state goes back, or a strategy recorded without its service is
+/// applied again.
+fn fix_restore_service(app: &AppHandle) -> anyhow::Result<()> {
+    let state = actions::state(app);
+    let pending = zapret::snapshot::pending_path(&state.paths.data());
+    if let Some(snapshot) = zapret::snapshot::Snapshot::load(&pending)? {
+        let operation = snapshot.operation.clone();
+        state.change_safely(&format!("restore pending ({operation})"), || {
+            snapshot.restore()?;
+            zapret::snapshot::Snapshot::clear(&pending)?;
+            Ok(())
+        })?;
+        return Ok(());
+    }
+    if let Some(strategy) = service::strategy() {
+        actions::apply(app, &strategy)?;
+        return Ok(());
+    }
+    anyhow::bail!("there is nothing to restore: no unfinished operation and no strategy applied");
+}
+
+/// Donor `.bin` names to copy from, table first, then the same stem without its trailing number
+/// (`stun2.bin` → `stun.bin`).
+fn donor_candidates(name: &str) -> Vec<String> {
+    let mut donors: Vec<String> = BIN_DONORS
+        .iter()
+        .find(|(target, _)| *target == name)
+        .map(|(_, donors)| donors.iter().map(|donor| donor.to_string()).collect())
+        .unwrap_or_default();
+    let Some(stem) = name.strip_suffix(".bin") else {
+        return donors;
+    };
+    let cut = stem.trim_end_matches(|c: char| c.is_ascii_digit());
+    let without = cut.trim_end_matches(['_', '-']);
+    let fallback = format!("{without}.bin");
+    if !without.is_empty() && without.len() != stem.len() && !donors.contains(&fallback) {
+        donors.push(fallback);
+    }
+    donors
+}
+
+/// The `.bin` files to repair: every empty one of the bin folder, and names the active strategy
+/// loads that it holds nothing under.
+fn repairable(engine: &Engine, service_strategy: Option<&str>) -> Vec<String> {
+    let bin = strategies::bin_dir(engine);
+    let mut broken: Vec<String> = match std::fs::read_dir(&bin) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                name.ends_with(".bin")
+                    && std::fs::metadata(bin.join(name)).is_ok_and(|meta| meta.len() == 0)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    broken.sort();
+    let referenced = active_text(engine, service_strategy)
+        .map(|active| referenced_bins(&active.text))
+        .unwrap_or_default();
+    for used in referenced {
+        if !std::fs::metadata(bin.join(&used)).is_ok_and(|meta| meta.len() > 0)
+            && !broken.contains(&used)
+        {
+            broken.push(used);
+        }
+    }
+    broken
+}
+
+/// Empty and missing `.bin` files are copied over from their non-empty donors.
+fn fix_repair_bins(app: &AppHandle) -> anyhow::Result<()> {
+    let state = actions::state(app);
+    let engine = state.engine2_required()?;
+    let bin = strategies::bin_dir(&engine);
+    let broken = repairable(&engine, service::strategy().as_deref());
+    anyhow::ensure!(!broken.is_empty(), "no empty or missing `.bin` to repair");
+    let mut fixed = Vec::new();
+    for name in broken {
+        let donor = donor_candidates(&name)
+            .into_iter()
+            .find(|donor| {
+                std::fs::metadata(bin.join(donor)).is_ok_and(|meta| meta.len() > 0)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{name}: no non-empty donor `.bin` in {} — reinstall the engine release",
+                    bin.display()
+                )
+            })?;
+        std::fs::copy(bin.join(&donor), bin.join(&name))?;
+        log::info!("{} ← {}", bin.join(&name).display(), donor);
+        fixed.push(name);
+    }
+    log::info!("{}.bin files repaired: {}", fixed.len(), fixed.join(", "));
+    Ok(())
+}
+
+/// Outside engine processes end, foreign `zapret*` tables go; the service's own engine and this
+/// app stay.
+fn fix_kill_conflicts() -> anyhow::Result<()> {
+    let (name, _) = service::active();
+    let service_pid = service::status(name).map_or(0, |(_, pid)| pid);
+    let own = std::process::id();
+    let mut killed: Vec<String> = Vec::new();
+    for image in ["nfqws2", "nfqws", "winws2", "winws"] {
+        for proc in zapret::procs::find(image) {
+            if proc.pid == service_pid || proc.pid == own {
+                continue; // the service's own engine, or this very app
+            }
+            zapret::procs::kill(proc.pid)?;
+            killed.push(format!("{image} (pid {})", proc.pid));
+        }
+    }
+    let mut removed: Vec<String> = Vec::new();
+    if let Ok(out) = zapret::root::run("nft", &["list", "tables"]) {
+        for table in out
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains("zapret") && !line.contains("zapret_hub"))
+        {
+            // `table inet zapretunix` → `nft delete table inet zapretunix`.
+            let args: Vec<&str> = ["delete"]
+                .iter()
+                .copied()
+                .chain(table.split_whitespace())
+                .collect();
+            match zapret::root::run("nft", &args) {
+                Ok(out) if out.success() => removed.push(table.to_owned()),
+                other => {
+                    let err = match other {
+                        Ok(out) => out.check().map(|_| ()).err(),
+                        Err(err) => Some(err),
+                    };
+                    let err = err
+                        .map(|err| err.to_string())
+                        .unwrap_or_else(|| "nft answered nothing".into());
+                    log::warn!("nft delete {table}: {err}");
+                }
+            }
+        }
+    }
+    if killed.is_empty() && removed.is_empty() {
+        anyhow::bail!("no outside engine process and no foreign table left");
+    }
+    log::info!(
+        "the conflicts are gone: {} process(es), {} table(s)",
+        killed.len(),
+        removed.len()
+    );
+    Ok(())
 }
 
 // --- probe -----------------------------------------------------------------------------------------------
@@ -880,5 +1320,30 @@ mod tests {
             referenced_bins(text),
             ["ACTIVE_GAME_UDP.bin", "quic_initial_www_google_com.bin", "missing.bin"]
         );
+    }
+
+    #[test]
+    fn a_query_frames_the_name_type_and_class() {
+        let query = dns_query(0x1234u16, "discord.com");
+        assert_eq!(&query[..12], &[0x12, 0x34, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&query[12..], b"\x07discord\x03com\x00\x00\x01\x00\x01");
+        // A trailing dot changes nothing.
+        assert_eq!(dns_query(1u16, "ya.ru."), dns_query(1u16, "ya.ru"));
+    }
+
+    #[test]
+    fn donors_come_from_the_table_then_the_stem() {
+        assert_eq!(donor_candidates("stun2.bin"), ["stun.bin"]);
+        assert_eq!(
+            donor_candidates("quic_initial_4pda_to.bin"),
+            ["quic_initial_www_google_com.bin"]
+        );
+        assert_eq!(
+            donor_candidates("tls_clienthello_sochi_park.bin"),
+            ["tls_clienthello_max_ru.bin"]
+        );
+        // No table entry: the same name without its trailing number is tried.
+        assert_eq!(donor_candidates("some2.bin"), ["some.bin"]);
+        assert!(donor_candidates("unique.bin").is_empty());
     }
 }

@@ -129,6 +129,13 @@ pub enum Request {
     },
     /// The whole state of every subsystem, problems included, in one answer.
     Doctor,
+    /// One automatic remedy of `doctor` (`fix_doctor_issue`): the app checks the action's JSON
+    /// against its own `FixAction`, then answers with the report again.
+    FixDoctorIssue {
+        action: Value,
+    },
+    /// Every fixable problem of a fresh `doctor` at once.
+    FixAllDoctorIssues,
     /// A domain (`discord.com`) or URL (`https://gateway.discord.gg`): DNS, the lists, the rules
     /// and the live checks of it.
     #[serde(rename = "probe")]
@@ -364,6 +371,10 @@ mod tests {
                 args: String::new(),
             },
             Request::Doctor,
+            Request::FixDoctorIssue {
+                action: json!({ "kind": "restore_service" }),
+            },
+            Request::FixAllDoctorIssues,
             Request::ProbeTarget {
                 target: "https://gateway.discord.gg".into(),
             },
