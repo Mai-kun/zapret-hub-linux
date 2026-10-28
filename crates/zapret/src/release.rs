@@ -410,7 +410,12 @@ pub fn expand(archive: &Path, dest: &Path, cancel: &AtomicBool) -> anyhow::Resul
     for (program, args) in attempts {
         let mut cmd = Command::new(program);
         cmd.args(&args);
-        let out = exec::run(&mut cmd, Duration::from_secs(300), Some(cancel))?;
+        let out = match exec::run(&mut cmd, Duration::from_secs(300), Some(cancel)) {
+            Ok(out) => out,
+            // The unpacker is not installed: that is what the next attempt is for.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err).with_context(|| format!("{shown} cannot be unpacked")),
+        };
         if out.canceled {
             anyhow::bail!("canceled");
         }
