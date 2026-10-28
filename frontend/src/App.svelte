@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { SvelteSet } from "svelte/reactivity";
   import ConfirmDialog from "./components/ConfirmDialog.svelte";
   import Notices from "./components/Notices.svelte";
   import Overview from "./tabs/Overview.svelte";
@@ -25,6 +26,14 @@
 
   const current = $derived(TABS.find((tab) => tab.id === app.tab) ?? TABS[0]!);
 
+  // Lazy keep-alive: a tab enters the DOM on its first visit and stays mounted, so a switch is
+  // a CSS toggle, not a remount — scroll, search and loaded data survive, the change is instant.
+  const visited = new SvelteSet<Tab>();
+  const panes = $derived(TABS.filter((tab) => visited.has(tab.id) || tab.id === current.id));
+  $effect(() => {
+    visited.add(app.tab);
+  });
+
   onMount(() => void start());
 
   // Files dropped into a strategies folder by hand announce nothing: coming back to the window reads everything again.
@@ -49,7 +58,11 @@
       </div>
     </nav>
     <main>
-      <current.view />
+      {#each panes as pane (pane.id)}
+        <div class="tab-pane" class:active={pane.id === current.id}>
+          <pane.view />
+        </div>
+      {/each}
     </main>
   </div>
 {:else}
@@ -107,8 +120,19 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 14px;
     padding: 16px;
     overflow: auto;
+  }
+
+  /* The mounted tabs hide in place; the active one takes over main's old layout duties. */
+  .tab-pane {
+    display: none;
+  }
+
+  .tab-pane.active {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    gap: 14px;
   }
 </style>

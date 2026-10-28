@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { commands, type ExclusionRule, type FlowRow, type Preset, type RouterState, type RouterStatus, type RoutesView, type Rule } from "$lib/ipc/bindings";
   import { app, change } from "$lib/app.svelte";
   import { call } from "$lib/api";
@@ -47,9 +47,10 @@
   // One notice for a run of failed reads, not one a second.
   let failing = false;
 
-  // Latency and flows announce nothing: read once a second while the tab is open and the window is shown.
+  // Latency and flows announce nothing: read once a second while the tab is the open one and
+  // the window is shown. The keep-alive tab stays mounted, so the poll sleeps on any other tab.
   async function refresh(): Promise<void> {
-    if (document.hidden) return;
+    if (app.tab !== "routes" || document.hidden) return;
     const mine = ++asked;
     try {
       const answer = await Promise.all([commands.routerStatus(), commands.listRoutes(), commands.routeFlows(all)]);
@@ -69,19 +70,26 @@
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     let alive = true;
-    // The next read starts a second after the last answered: a slow `listRoutes` does not pile them up.
+    // The next read starts a second after the last answered: a slow `listRoutes` does not pile
+    // them up. Off the tab the tick only reschedules — no IPC, no backend work.
     const tick = async (): Promise<void> => {
       try {
-        await refresh();
+        if (alive && app.tab === "routes" && !document.hidden) await refresh();
       } finally {
         if (alive) timer = setTimeout(tick, 1000);
       }
     };
-    void tick();
+    timer = setTimeout(tick, 1000);
     return () => {
       alive = false;
       clearTimeout(timer);
     };
+  });
+
+  // Coming back to the tab reads at once, not on the next tick; `untrack` keeps `all` out of
+  // the dependencies — flipping «все» refreshes through `showAll` already.
+  $effect(() => {
+    if (app.tab === "routes") void untrack(refresh);
   });
 
   function stateLabel(state: RouterState): { text: string; class: string } {
