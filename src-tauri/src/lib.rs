@@ -174,6 +174,9 @@ pub fn run() -> anyhow::Result<()> {
             window::show(app)
         }))
         .plugin(tauri_plugin_dialog::init())
+        // The updater and its «Установить и перезапустить» restart (configured in tauri.conf.json).
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(state)
         // The cross hides the window instead of destroying it: the last window gone makes the GTK
         // main loop quit and kills the tray. Only the tray's «Выход» may end the app.

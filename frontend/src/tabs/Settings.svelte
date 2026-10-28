@@ -8,6 +8,7 @@
   import { LINKS, S } from "$lib/strings";
   import DownloadEngine from "../components/DownloadEngine.svelte";
   import Select from "../components/Select.svelte";
+  import UpdateChecker from "../components/UpdateChecker.svelte";
 
   const themeOptions: { value: Theme; label: string }[] = (["system", "light", "dark"] as Theme[]).map(
     (theme) => ({ value: theme, label: S.settings.themes[theme] }),
@@ -199,6 +200,7 @@
     <section class="card">
       <h2>{S.settings.about}</h2>
       {#if version}<p class="muted">{S.settings.version(version)}</p>{/if}
+      <UpdateChecker />
       <div class="buttons">
         <button onclick={() => call(S.failed.open, commands.openFolder("Logs"))}>{S.settings.openLogs}</button>
       </div>

@@ -105,6 +105,8 @@ export const S = {
     doctor: "Проверка системы не выполнена",
     fix: "Проблема не исправлена",
     fixAll: "Не всё исправилось",
+    updateCheck: "Обновление не проверено",
+    updateInstall: "Обновление не установлено",
   },
   svc: {
     NotInstalled: "не установлена",
@@ -206,6 +208,14 @@ export const S = {
     openLogs: "Открыть журнал логов",
     openZapret2: "Открыть папку",
     version: (version: string) => `Zapret Hub ${version}`,
+  },
+  update: {
+    title: "Обновление",
+    check: "Проверить обновления приложения",
+    available: (version: string) => `Доступно обновление Zapret Hub v${version}`,
+    install: "Установить и перезапустить",
+    latest: "У вас последняя версия Zapret Hub",
+    installing: "Устанавливаю обновление…",
   },
   download: {
     button: "Скачать релиз…",

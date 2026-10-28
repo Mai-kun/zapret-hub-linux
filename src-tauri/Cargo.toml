@@ -43,6 +43,8 @@ specta-typescript.workspace = true
 tauri.workspace = true
 tauri-plugin-dialog.workspace = true
 tauri-plugin-single-instance.workspace = true
+tauri-plugin-updater.workspace = true
+tauri-plugin-process.workspace = true
 tauri-specta.workspace = true
 toml.workspace = true
 

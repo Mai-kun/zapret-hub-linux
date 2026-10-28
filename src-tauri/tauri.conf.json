@@ -16,7 +16,17 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/icon.ico"]
+    "active": true,
+    "targets": ["appimage", "deb"],
+    "createUpdaterArtifacts": true,
+    "icon": ["icons/icon.png", "icons/icon.ico"]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Mai-kun/zapret-hub-linux/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhEQTM1OTY0MzgwMkU0MUMKUldRYzVBSTRaRm1qamVSZmkzK2Nnd2hmMkZmREtLS1hKWDFGTHdCVkY2RVJQZUdyU3NkNktaZTAK"
+    }
   }
 }

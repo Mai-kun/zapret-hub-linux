@@ -10,7 +10,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.12.1"
+    "@tauri-apps/api": "2.12.1",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.14.1"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "7.3.1",

@@ -1,5 +1,11 @@
-# Push a tag like v0.7.0: tests, builds the app and CLI on Windows and attaches the zip to a GitHub release.
-# Run by hand (Actions → release → Run workflow) to only test and build; the zip is then an artifact.
+# Push a tag like v0.7.0: tests, builds the app, CLI and Linux packages, and attaches them to a
+# GitHub release together with the updater manifest (latest.json).
+# Run by hand (Actions → release → Run workflow) to only test and build; the packages are artifacts.
+#
+# Required secrets (repo → Settings → Secrets and variables → Actions):
+# - TAURI_SIGNING_PRIVATE_KEY: the contents of ~/.tauri/zapret-hub.key (updater signing key).
+#   Without it even a manual run fails: the updater config demands signed bundles.
+# - TAURI_SIGNING_PRIVATE_KEY_PASSWORD: the key password; empty for the generated key.
 name: release
 
 on:
@@ -12,50 +18,80 @@ permissions:
 
 jobs:
   release:
-    runs-on: windows-latest
+    # 22.04 runners retire in 2026; 24.04 is the oldest image left. Packages built here need a
+    # glibc of at least the runner's (2.39).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
+      - name: Install Tauri and WebKitGTK build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       # rustup on the runner installs the toolchain pinned in rust-toolchain.toml on first use.
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
-      - run: cargo test --workspace --exclude zapret-hub
+      - run: cargo test --workspace
+      - run: npm run check
+      - run: npm run test
       - name: Build and pack
-        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          set -euo pipefail
           # The first `version = "..."` line of the root Cargo.toml is [workspace.package]'s.
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"$' | Select-Object -First 1).Matches[0].Groups[1].Value
+          version=$(grep -m1 '^version = "' Cargo.toml | sed 's/^version = "\(.*\)"$/\1/')
           npm run tauri build
-          if ($LASTEXITCODE -ne 0) { throw "npm run tauri build exited with $LASTEXITCODE" }
           cargo build --release -p cli
-          if ($LASTEXITCODE -ne 0) { throw "cargo build exited with $LASTEXITCODE" }
-          # Only the zip is the output: the app keeps its settings next to its exe, so the zip is
-          # staged in a folder of its own.
-          $zip = "dist/zapret-hub-$version.zip"
-          $stage = "dist/.stage-$version"
-          New-Item -ItemType Directory -Force $stage | Out-Null
-          Copy-Item target/release/zapret-hub.exe, target/release/zapret-hub-cli.exe, README.md, docs/cli.md -Destination $stage
-          Compress-Archive -Path "$stage/*" -DestinationPath $zip
-          Remove-Item -Recurse -Force $stage
+          # A clean portable archive: unpack anywhere, run ./zapret-hub.
+          stage="dist/.stage-$version"
+          mkdir -p "$stage"
+          cp target/release/zapret-hub target/release/zapret-hub-cli "$stage/"
+          cp README.md docs/cli.md "$stage/"
+          cp src-tauri/icons/icon.png "$stage/zapret-hub.png"
+          cp packaging/zapret-hub.desktop "$stage/"
+          tar -czf dist/zapret-hub-linux-x86_64.tar.gz -C "$stage" .
+          rm -rf "$stage"
       - uses: actions/upload-artifact@v4
         if: github.ref_type != 'tag'
         with:
-          name: zapret-hub
-          path: dist/*.zip
+          name: zapret-hub-linux
+          path: |
+            dist/*.tar.gz
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/appimage/*.AppImage.sig
+            target/release/bundle/deb/*.deb
       - name: Release
         if: github.ref_type == 'tag'
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
-          $zip = "dist/zapret-hub-$version.zip"
-          if (-not (Test-Path $zip)) { throw "$zip not built: does the tag match Cargo.toml's version?" }
-          # The release notes are this version's section of CHANGELOG.md.
-          $notes = ((Get-Content CHANGELOG.md -Raw) -split '(?m)^## ' | Where-Object { $_ -like "$version*" }) -replace "^$([regex]::Escape($version))\s*", ''
-          Set-Content notes.md $notes
-          gh release create "${{ github.ref_name }}" $zip --title "Zapret Hub $version" --notes-file notes.md
+          set -euo pipefail
+          version="${{ github.ref_name }}"
+          version="${version#v}"
+          # Normalized names: the bundle names may carry spaces, and GitHub would mangle them in
+          # asset URLs that latest.json has to match.
+          appimage=$(find target/release/bundle/appimage -name '*.AppImage' | head -n1)
+          signed="dist/zapret-hub_${version}_amd64.AppImage"
+          cp "$appimage" "$signed"
+          cp "$appimage.sig" "$signed.sig"
+          cp target/release/bundle/deb/*.deb "dist/zapret-hub_${version}_amd64.deb"
+          # The updater manifest: the release notes are this version's section of CHANGELOG.md.
+          notes=$(awk -v ver="$version" '/^## /{insec = ($2 == ver)} insec && !/^## /{print}' CHANGELOG.md)
+          url="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$(basename "$signed")"
+          jq -n --arg version "$version" --arg notes "$notes" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg url "$url" --arg signature "$(cat "$signed.sig")" '{
+            version: $version,
+            notes: $notes,
+            pub_date: $date,
+            platforms: {"linux-x86_64": {signature: $signature, url: $url}}
+          }' > dist/latest.json
+          printf '%s\n' "$notes" > notes.md
+          gh release create "${{ github.ref_name }}" \
+            "$signed" "$signed.sig" "dist/zapret-hub_${version}_amd64.deb" \
+            dist/zapret-hub-linux-x86_64.tar.gz dist/latest.json \
+            --title "Zapret Hub $version" --notes-file notes.md

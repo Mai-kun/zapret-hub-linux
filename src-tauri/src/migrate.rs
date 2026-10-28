@@ -100,13 +100,10 @@ mod tests {
 
     #[test]
     fn a_release_folder_moves_by_its_own_name_into_the_hub() {
+        // The hub slot comes from the real data home: name the expectation the same way.
         let old = Path::new("/home/me/.local/share/zapret2-v1.0.5.2");
-        assert_eq!(
-            hub_slot(old),
-            Some(PathBuf::from(
-                "/home/me/.local/share/zapret-hub/zapret2-v1.0.5.2"
-            ))
-        );
+        let expected = zapret::release::default_parent().join(old.file_name().unwrap());
+        assert_eq!(hub_slot(old), Some(expected));
         assert_eq!(hub_slot(Path::new("/home/me/.local/share/tg-ws-proxy")), None);
         assert_eq!(hub_slot(Path::new("/home/me/.local/share/zapret-hub")), None);
         assert_eq!(hub_slot(Path::new("relative")), None);

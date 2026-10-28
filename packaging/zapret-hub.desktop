@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Zapret Hub
+GenericName=DPI bypass manager
+Comment=Управление обходом блокировок (zapret2)
+Exec=zapret-hub
+Icon=zapret-hub
+Terminal=false
+Categories=Network;
+StartupWMClass=ZapretHub

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { commands, type ProxyStatus, type RunSummary, type TgWsStatus } from "$lib/ipc/bindings";
   import CopyButton from "../components/CopyButton.svelte";
+  import UpdateChecker from "../components/UpdateChecker.svelte";
   import { call } from "$lib/api";
   import { app, change, refreshOverview } from "$lib/app.svelte";
   import { latestPerSuite, ms, runDate } from "$lib/format";
@@ -277,6 +278,11 @@
         {/if}
         <div class="buttons"><button disabled={proxyBusy} onclick={checkProxy}>{S.common.check}</button></div>
       {/if}
+    </section>
+    <!-- Обновление приложения -->
+    <section class="card">
+      <h2>{S.update.title}</h2>
+      <UpdateChecker />
     </section>
   </div>
 {:else}
