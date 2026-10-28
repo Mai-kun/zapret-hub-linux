@@ -5,14 +5,18 @@ use std::time::Duration;
 use zapret::procs::Winws;
 use zapret::service::{SvcState, config, parse_timestamps, state};
 
-/// The systemd tests read the real service manager: they only make sense where one answers.
-/// A CI container runs without a working systemd.
+/// The systemd tests read the real service manager: they only make sense where the exact
+/// operations they make answer like on a desktop. A CI container half-runs systemd: `is-active`
+/// succeeds, `show` and `cat` do not.
 fn systemd_answers() -> bool {
-    Path::new("/run/systemd/system").exists()
-        && Command::new("systemctl")
-            .args(["is-active", "--quiet", "systemd-journald"])
-            .status()
-            .is_ok_and(|status| status.success())
+    let show = Command::new("systemctl")
+        .args(["show", "systemd-journald", "--property=ActiveState", "--value"])
+        .output();
+    let cat = Command::new("systemctl")
+        .args(["cat", "systemd-timesyncd"])
+        .output();
+    show.is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "active")
+        && cat.is_ok_and(|out| out.status.success())
 }
 
 #[test]
