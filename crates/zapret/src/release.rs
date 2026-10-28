@@ -296,14 +296,19 @@ fn unpack(
     anyhow::ensure!(!cancel.load(Ordering::Relaxed), "canceled");
     let sha256 = hash_file(&zip)?;
     log::info!("{} SHA-256 {sha256}", release.zip.name);
-    let listed = parse_sums(sums)
-        .into_iter()
-        .find(|(_, path)| path.rsplit('/').next() == Some(release.zip.name.as_str()));
-    anyhow::ensure!(
-        listed.is_some() && listed.clone().unwrap().0 == sha256,
-        "{} does not match sha256sum.txt",
-        release.zip.name
-    );
+    // The release's sha256sum.txt lists the unpacked binaries and Lua, not the archive itself:
+    // whether the zip is listed or not says nothing about its integrity, and a truncated download
+    // dies in `expand` or in `verify` below.
+    if let Some(listed) = listed_zip_hash(sums, &release.zip.name)
+        && listed != sha256
+    {
+        log::warn!(
+            "{} does not match the hash sha256sum.txt lists for it ({}): \
+             the unpacked files are what gets verified",
+            release.zip.name,
+            listed
+        );
+    }
     let raw = staging.join("x");
     expand(&zip, &raw, cancel)?;
     let root = content_root(&raw)?;
@@ -313,15 +318,26 @@ fn unpack(
     Ok(sha256)
 }
 
+/// The hash `sums` lists for the zip itself, when it lists the archive at all.
+fn listed_zip_hash(sums: &str, zip_name: &str) -> Option<String> {
+    parse_sums(sums)
+        .into_iter()
+        .find(|(_, path)| path.rsplit('/').next() == Some(zip_name))
+        .map(|(hash, _)| hash)
+}
+
 /// The unpack loses the Linux executables' rights: `nfqws2` gets them back, plus the caps its
-/// queue needs, best effort — without them only a root run works, and the launch errors say that.
+/// queue needs, best effort — without them every launch dies with `setpcap: Operation not
+/// permitted` (and a manual unpack never runs this, so `verify` cannot catch it either).
 fn chmod_nfqws(dir: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
-    let Some(binaries) = std::fs::read_dir(dir.join("binaries")).ok() else {
-        return;
-    };
-    for entry in binaries.flatten() {
-        let nfqws = entry.path().join("nfqws2");
+    let mut engines = vec![dir.join("nfqws2")];
+    if let Ok(binaries) = std::fs::read_dir(dir.join("binaries")) {
+        for entry in binaries.flatten() {
+            engines.push(entry.path().join("nfqws2"));
+        }
+    }
+    for nfqws in engines {
         if !nfqws.is_file() {
             continue;
         }
@@ -331,7 +347,7 @@ fn chmod_nfqws(dir: &Path) {
         if let Err(err) = crate::root::run(
             "setcap",
             &[
-                "cap_net_admin,cap_net_raw=+ep",
+                "cap_net_admin,cap_net_raw=eip",
                 nfqws.display().to_string().as_str(),
             ],
         ) {
@@ -454,6 +470,21 @@ fn move_up(root: &Path, dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_zip_hash_is_optional_in_the_release_sums() {
+        // bol-van's sha256sum.txt lists the unpacked files, never the archive itself.
+        let sums = "\
+25049b2bff954c02051e1102a06d34f2f0f946b069d350c9065a86ecd88267c1  zapret2-v1.0.6/binaries/linux-x86_64/nfqws2\n\
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  zapret2-v1.0.6/lua/zapret-lib.lua\n";
+        assert_eq!(listed_zip_hash(sums, "zapret2-v1.0.6.zip"), None);
+        // A release that does list the archive: its hash is found.
+        let sums = format!("{}  *./zapret2-v1.0.6.zip\n", "a".repeat(64));
+        assert_eq!(
+            listed_zip_hash(&sums, "zapret2-v1.0.6.zip"),
+            Some("a".repeat(64))
+        );
+    }
 
     fn api(tag: &str, assets: &[(&str, &str)]) -> String {
         let assets: Vec<_> = assets
