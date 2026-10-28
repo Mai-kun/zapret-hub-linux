@@ -1,16 +1,14 @@
 //! Per-flow decisions, the queue of packets waiting for the proxy, and counters.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::divert::Address;
 use crate::rules::Protocol;
 use crate::socks::SocksError;
 
-pub const QUEUE: usize = 64;
 pub const IDLE: Duration = Duration::from_secs(30);
 pub const KEEP_CLOSED: Duration = Duration::from_secs(30);
 /// Most rule-less rows listed with `all`.
@@ -94,31 +92,6 @@ pub struct FlowRow {
     pub down: f64,
     pub seconds: u32,
     pub closed: bool,
-}
-
-/// Packets of a flow waiting for the proxy; the oldest go first when it overflows.
-#[derive(Default)]
-pub struct Pending(VecDeque<(Vec<u8>, Address)>);
-
-impl Pending {
-    pub fn push(&mut self, packet: Vec<u8>, addr: Address) {
-        if self.0.len() == QUEUE {
-            self.0.pop_front();
-        }
-        self.0.push_back((packet, addr));
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn drain(&mut self) -> Vec<(Vec<u8>, Address)> {
-        self.0.drain(..).collect()
-    }
 }
 
 /// `None` = through the proxy. UDP refusal (`NoUdp`) is learned from `UDP ASSOCIATE` itself.
@@ -250,6 +223,11 @@ impl Stats {
             f.closed
                 .is_none_or(|c| now.saturating_duration_since(c) < KEEP_CLOSED)
         });
+    }
+
+    /// Forgets every flow: a new session starts from zero counters.
+    pub fn clear(&mut self) {
+        self.0.clear();
     }
 
     /// Open flows and those closed less than `KEEP_CLOSED` ago; older closed ones are dropped.

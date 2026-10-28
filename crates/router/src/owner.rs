@@ -26,6 +26,12 @@ impl Owners {
         self.map.lock().unwrap().remove(&local_port);
     }
 
+    /// Forgets every port: a new session knows nobody.
+    pub fn clear(&self) {
+        self.map.lock().unwrap().clear();
+        self.changed.notify_all();
+    }
+
     pub fn wait(&self, local_port: u16, timeout: Duration) -> Option<u32> {
         let guard = self.map.lock().unwrap();
         let (guard, _) = self

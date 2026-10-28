@@ -1,38 +1,25 @@
 //! The router in the app (router spec 3, 7): its setup from the settings, and the pause for what
-//! takes its WinDivert driver away.
+//! changes the engines underneath it.
 
-use std::path::Path;
 use std::sync::Mutex;
 
-use router::divert::{Engine, pick_dll};
 use router::{RouterStatus, Setup, parse_proxy};
 use tauri::AppHandle;
-use zapret::service::WINWS2;
 
 use crate::actions::{self, state};
 use crate::settings::Settings;
 use crate::state::{AppState, lock};
 
-/// The DLL of the engine running now (spec 3.1) and the proxy from the settings.
+/// The proxy from the settings; the engine underneath needs no part of the setup: the nftables
+/// table and the acceptor are entirely the hub's own.
 pub fn setup(state: &AppState) -> anyhow::Result<Setup> {
     let settings = state.settings();
     let proxy = parse_proxy(settings.socks5.as_deref())?;
-    let running = if zapret::procs::is_running(WINWS2) {
-        Some(Engine::Zapret2)
-    } else {
-        None
-    };
-    let engine2 = state.engine2().ok().flatten();
-    let dll = pick_dll(
-        running,
-        engine2.as_ref().and_then(|engine| engine.exe().parent()),
-        Path::is_file,
-    )?;
-    Ok(Setup { dll, proxy })
+    Ok(Setup { proxy })
 }
 
-/// The router as `router_enabled` says, with the DLL and the proxy in force now. A failed start
-/// is already in the router's status.
+/// The router as `router_enabled` says, with the proxy in force now. A failed start is already
+/// in the router's status.
 pub fn sync(app: &AppHandle) {
     let state = state(app);
     if !state.settings().router_enabled {
@@ -80,13 +67,13 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> anyhow::Result<RouterStatu
     saved.map(|()| state.router.status())
 }
 
-/// Pauses going at once: what may remove the driver and routing may overlap, and routing comes
+/// Pauses going at once: what may change the engines and routing may overlap, and routing comes
 /// back only when the last one ends.
 static PAUSES: Mutex<usize> = Mutex::new(0);
 
-/// `f` with routing paused (spec 7): its handles are closed, so the driver can change under it.
-/// On every way out of `f`, a panic included, the router takes the DLL of the engine running then
-/// and, once the last pause ends, resumes.
+/// `f` with routing paused (spec 7): its sockets are closed, so the engines can change under it.
+/// On every way out of `f`, a panic included, the router resumes with the settings in force then
+/// and, once the last pause ends, unpauses.
 pub fn paused<T>(app: &AppHandle, f: impl FnOnce() -> T) -> T {
     struct Resume<'a>(&'a AppHandle);
     impl Drop for Resume<'_> {

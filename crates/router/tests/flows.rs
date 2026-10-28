@@ -1,21 +1,7 @@
-use router::divert::Address;
-use router::flows::{self, DirectReason, FlowKey, MAX_UNRULED, Pending, ProxyState, Stats, Via};
+use router::flows::{self, DirectReason, FlowKey, MAX_UNRULED, ProxyState, Stats, Via};
 use router::owner::{self, Images, Owners, PID_WAIT, table_pid};
 use router::rules::Protocol;
 use std::time::{Duration, Instant};
-
-#[test]
-fn the_queue_keeps_the_newest_64() {
-    let mut queue = Pending::default();
-    for i in 0..70u8 {
-        queue.push(vec![i], Address([0; 80]));
-    }
-    let left = queue.drain();
-    assert_eq!(left.len(), 64);
-    assert_eq!((left[0].0[0], left[63].0[0]), (6, 69));
-    assert_eq!(queue.len(), 0);
-    assert!(queue.is_empty());
-}
 
 #[test]
 fn new_flows_follow_the_proxy_state() {

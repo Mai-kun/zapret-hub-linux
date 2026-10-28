@@ -5,6 +5,17 @@ fn router(dir: &std::path::Path) -> Router {
     Router::new(dir.join("routes.toml"))
 }
 
+fn setup() -> Setup {
+    Setup {
+        proxy: "127.0.0.1:2080".parse().unwrap(),
+    }
+}
+
+/// Whether this process may apply the nftables table at all; without it a start fails.
+fn can_route() -> bool {
+    router::nft::can_apply()
+}
+
 #[test]
 fn a_new_router_is_off_and_pause_stop_resume_are_harmless() {
     let dir = tempfile::tempdir().unwrap();
@@ -17,17 +28,16 @@ fn a_new_router_is_off_and_pause_stop_resume_are_harmless() {
 }
 
 #[test]
-fn a_missing_dll_makes_it_unavailable_with_the_reason() {
+fn a_failed_start_makes_it_unavailable_with_the_reason() {
+    if can_route() {
+        return; // the start would succeed here; the reason is checked without the rights
+    }
     let dir = tempfile::tempdir().unwrap();
     let r = router(dir.path());
-    let setup = Setup {
-        dll: dir.path().join("WinDivert.dll"),
-        proxy: "127.0.0.1:2080".parse().unwrap(),
-    };
-    assert!(r.start(setup).is_err());
+    assert!(r.start(setup()).is_err());
     match r.status().state {
         RouterState::Unavailable { reason } => {
-            assert!(reason.contains("WinDivert.dll"), "{reason}")
+            assert!(reason.contains("nft"), "{reason}")
         }
         other => panic!("{other:?}"),
     }
@@ -145,22 +155,25 @@ fn the_proxy_is_an_ipv4_address_from_the_settings() {
 fn a_start_during_a_pause_waits_for_resume() {
     let dir = tempfile::tempdir().unwrap();
     let r = router(dir.path());
-    let setup = Setup {
-        dll: dir.path().join("WinDivert.dll"),
-        proxy: "127.0.0.1:2080".parse().unwrap(),
-    };
     r.pause();
     r.stop();
-    r.start(setup).unwrap();
+    r.start(setup()).unwrap();
     assert_eq!(
         r.status().state,
         RouterState::Paused,
         "nothing opens until resume"
     );
     r.resume();
-    assert!(
-        matches!(r.status().state, RouterState::Unavailable { reason } if reason.contains("WinDivert.dll"))
-    );
+    if can_route() {
+        assert_eq!(r.status().state, RouterState::Running);
+    } else {
+        assert!(matches!(
+            r.status().state,
+            RouterState::Unavailable { reason } if reason.contains("nft")
+        ));
+    }
+    r.stop();
+    assert_eq!(r.status().state, RouterState::Off);
 }
 
 #[test]

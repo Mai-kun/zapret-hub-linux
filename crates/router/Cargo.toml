@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Routes chosen traffic of Zapret Hub through a local SOCKS5 proxy with WinDivert."
+description = "Routes chosen traffic of Zapret Hub through a local SOCKS5 proxy with nftables redirect."
 
 [dependencies]
 anyhow.workspace = true

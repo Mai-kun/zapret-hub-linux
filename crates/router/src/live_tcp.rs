@@ -1,48 +1,28 @@
-//! The TCP and DNS side of a running session: reflected connections, the local acceptor and the
-//! names learned from sniffed DNS answers.
+//! The TCP side of a running session: the local acceptor, the real destinations recovered with
+//! `SO_ORIGINAL_DST`, and the relaying of every accepted connection to its way (the SOCKS5 proxy
+//! or, for what the rules leave alone, a direct connection of the hub itself).
 
 use std::io;
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpStream};
+use std::os::unix::io::{AsRawFd as _, FromRawFd as _};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use crate::divert::{Address, Handle, MAX_PACKET};
-use crate::flows::{self, DirectReason, FlowKey, QUEUE, Via};
+use crate::flows::{self, DirectReason, FlowKey, Via};
+use crate::nft;
 use crate::owner::{self, PID_WAIT};
-use crate::packet::{self, ACK, SYN, Tcp, parse_tcp, parse_udp, rewrite_tcp};
 use crate::rules::Protocol;
 use crate::socks::{self, OPEN_TIMEOUT, SocksError};
-use crate::tcp::{self, Verdict};
-use crate::{Live, ProxyState, Table, dns, spawn};
+use crate::tcp;
+use crate::{Live, ProxyState};
+
+/// How long a direct way out waits for the server.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// A silently gone client is dropped by TCP keepalives after about 3 minutes.
+const KEEPALIVE_SECS: libc::c_int = 120;
 
 impl Live {
-    /// Through the handle that captured the packet (it still sends while draining after a stop),
-    /// else through the capture in force.
-    fn out(&self, handle: Option<&Handle>, packet: &[u8], addr: &Address) {
-        match handle {
-            Some(h) => {
-                let _ = h.send(packet, addr);
-            }
-            None => self.inject(packet, addr),
-        }
-    }
-
-    fn reflect(
-        &self,
-        handle: Option<&Handle>,
-        packet: &[u8],
-        addr: &Address,
-        src: SocketAddrV4,
-        dst: SocketAddrV4,
-    ) {
-        let mut p = packet.to_vec();
-        rewrite_tcp(&mut p, src, dst);
-        let mut a = addr.as_inbound();
-        self.dll.checksums(&mut p, &mut a);
-        self.out(handle, &p, &a);
-    }
-
     pub(crate) fn domain_of(&self, dst: SocketAddrV4, now: Instant) -> Option<String> {
         self.names
             .lock()
@@ -51,7 +31,7 @@ impl Live {
             .map(str::to_owned)
     }
 
-    /// `rule` is empty for a connection caught for a program rule that matches none.
+    /// `rule` is empty for a connection caught by the table that matches no rule now.
     fn open_row(&self, key: FlowKey, rule: &str, exe: Option<&str>, via: Via, now: Instant) {
         let domain = self.domain_of(key.dst, now);
         let mut stats = self.stats.lock().unwrap();
@@ -64,7 +44,7 @@ impl Live {
         }
     }
 
-    /// A connection left alone: its row opens and closes at once (no NAT entry ends it later).
+    /// A connection left alone: its row opens and closes at once.
     fn direct_row(
         &self,
         key: FlowKey,
@@ -77,234 +57,227 @@ impl Live {
         self.stats.lock().unwrap().close(key, now);
     }
 
-    pub(crate) fn on_tcp(
-        self: &Arc<Self>,
-        handle: Option<&Handle>,
-        packet: &[u8],
-        seg: &Tcp,
-        addr: Address,
-    ) {
-        let now = Instant::now();
-        // Only the acceptor sends from its port; a reply without an entry is dropped.
-        if seg.src.port() == self.acceptor_port {
-            let verdict = self.nat.lock().unwrap().from_acceptor(seg, now);
-            if let Verdict::Rewrite { src, dst } = verdict {
-                self.reflect(handle, packet, &addr, src, dst);
-            }
-            return;
-        }
-        if self.is_stopped() || !packet::unicast(*seg.src.ip(), *seg.dst.ip()) {
-            return self.out(handle, packet, &addr);
-        }
-        let verdict = self
-            .nat
-            .lock()
-            .unwrap()
-            .from_client(seg, self.acceptor_port, now);
-        let key = FlowKey {
-            protocol: Protocol::Tcp,
-            local_port: seg.src.port(),
-            dst: seg.dst,
+    /// The real destination of a redirected connection, the one the client meant to reach
+    /// before the nftables `redirect` rewrote it.
+    fn original_dst(client: &TcpStream) -> io::Result<SocketAddrV4> {
+        let mut addr = libc::sockaddr_in {
+            sin_family: 0,
+            sin_port: 0,
+            sin_addr: libc::in_addr { s_addr: 0 },
+            sin_zero: [0; 8],
         };
-        match verdict {
-            Verdict::Rewrite { src, dst } => {
-                // A retransmitted SYN of a held connection: the held one goes out once a filter
-                // covers its destination.
-                if seg.flags & (SYN | ACK) == SYN && !self.waiting.lock().unwrap().covers(seg.dst) {
-                    return;
-                }
-                self.reflect(handle, packet, &addr, src, dst)
-            }
-            Verdict::Pass => self.out(handle, packet, &addr),
-            Verdict::Drop => {}
-            Verdict::Marked => {
-                let table = self.table.read().unwrap().clone();
-                if let Some(rule) = table.matches(Protocol::Tcp, seg.dst) {
-                    self.direct_row(key, rule, None, DirectReason::Marked, now);
-                }
-                self.out(handle, packet, &addr);
-            }
-            Verdict::Syn => self.on_syn(handle, packet, seg, addr, key, now),
+        let mut len = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        // SAFETY: `client` owns a live socket for the call; `addr`/`len` are valid out-pointers
+        // of the exact type getsockopt fills.
+        let rc = unsafe {
+            libc::getsockopt(
+                client.as_raw_fd(),
+                libc::SOL_IP,
+                libc::SO_ORIGINAL_DST,
+                (&mut addr as *mut libc::sockaddr_in).cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
         }
+        let ip = Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
+        Ok(SocketAddrV4::new(ip, u16::from_be(addr.sin_port)))
     }
 
-    fn on_syn(
-        self: &Arc<Self>,
-        handle: Option<&Handle>,
-        packet: &[u8],
-        seg: &Tcp,
-        addr: Address,
-        key: FlowKey,
-        now: Instant,
-    ) {
-        let table = self.table.read().unwrap().clone();
-        if table.matches(Protocol::Tcp, seg.dst).is_none()
-            && !table.wants_owner(Protocol::Tcp, seg.dst.port())
-        {
-            return self.out(handle, packet, &addr);
-        }
-        // ponytail: like a new UDP flow, an owner missing from events and tables blocks capture up
-        // to 50 ms per SYN (once per port).
-        let pid = self.tcp_owners.pid(key.local_port, PID_WAIT, |p| {
-            owner::table_pid(Protocol::Tcp, p)
-        });
-        let exe = pid.and_then(|p| self.images.get(p));
-        let exe = exe.as_deref();
-        let Some(rule) = table.matches_flow(Protocol::Tcp, seg.dst, exe) else {
-            self.direct_row(key, "", exe, DirectReason::NoRule, now);
-            return self.out(handle, packet, &addr);
+    /// A direct TCP connection that carries the nftables mark, so the router's own table lets
+    /// it pass. `false` in the second item says the mark was refused (no `CAP_NET_ADMIN`).
+    fn connect_marked(orig: SocketAddrV4, timeout: Duration) -> io::Result<(TcpStream, bool)> {
+        // SAFETY: a plain socket() call; the fd is wrapped (and so owned) before any early return.
+        let fd = unsafe {
+            libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0)
         };
-        let state = self.proxy_state.lock().unwrap().clone();
-        let proxy_pid = *self.proxy_pid.lock().unwrap();
-        if let Some(reason) = flows::decide(&state, pid, std::process::id(), proxy_pid) {
-            self.direct_row(key, rule, exe, reason, now);
-            return self.out(handle, packet, &addr);
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
         }
-        // ponytail: a program rule's connection to a new address waits for a filter reopen (its
-        // address joins the held part); a browser in `apps` reopens it per address. Upgrade: a
-        // `tcp.SrcPort == p` part for the ports of matched sockets.
-        let verdict = {
-            // Held under one lock with the admit, so `release` cannot miss this SYN.
-            let mut waiting = self.waiting.lock().unwrap();
-            let covered = waiting.covers(seg.dst);
-            if !covered && waiting.syns.len() >= QUEUE {
-                drop(waiting);
-                return self.out(handle, packet, &addr);
+        // SAFETY: `fd` is a fresh, owned socket fd; the wrapper takes it over exactly once.
+        let sock = unsafe { TcpStream::from_raw_fd(fd) };
+        let marked = nft::mark(&sock);
+        let sin = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: orig.port().to_be(),
+            sin_addr: libc::in_addr {
+                s_addr: u32::from(*orig.ip()).to_be(),
+            },
+            sin_zero: [0; 8],
+        };
+        // SAFETY: `sin` outlives the call; `fd` is a live socket.
+        let rc = unsafe {
+            libc::connect(
+                fd,
+                (&sin as *const libc::sockaddr_in).cast(),
+                size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EINPROGRESS) {
+                return Err(err);
             }
-            let verdict = self.nat.lock().unwrap().admit(seg, self.acceptor_port, now);
-            self.open_row(key, rule, exe, Via::Opening, now);
-            if !covered {
-                waiting.syns.push((packet.to_vec(), addr));
-                drop(waiting);
-                self.recompose_soon();
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // SAFETY: `pfd` is a valid one-entry poll array for the call.
+            let waited = unsafe { libc::poll(&mut pfd, 1, timeout.as_millis() as libc::c_int) };
+            if waited <= 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the direct connection timed out",
+                ));
+            }
+            let mut soerr: libc::c_int = 0;
+            let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+            // SAFETY: `soerr`/`len` are valid out-pointers of the exact type getsockopt fills.
+            unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_ERROR,
+                    (&mut soerr as *mut libc::c_int).cast(),
+                    &mut len,
+                )
+            };
+            if soerr != 0 {
+                return Err(io::Error::from_raw_os_error(soerr));
+            }
+        }
+        sock.set_nonblocking(false)?;
+        Ok((sock, marked))
+    }
+
+    /// Keepalives drop a client that vanished without a FIN or an RST.
+    fn keepalive(stream: &TcpStream) {
+        let on: libc::c_int = 1;
+        // SAFETY: `stream` owns a live socket for each call; the pointers cover the ints.
+        unsafe {
+            if libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                (&raw const on).cast(),
+                size_of::<libc::c_int>() as u32,
+            ) != 0
+            {
                 return;
             }
-            verdict
-        };
-        if let Verdict::Rewrite { src, dst } = verdict {
-            self.reflect(handle, packet, &addr, src, dst);
-        }
-    }
-
-    /// Hands the held SYNs (admitted already) the filter just put in force covers (`active` and
-    /// its held destinations) to it, keeping the rest; when it could not open, forgets their
-    /// entries and sends them unchanged.
-    pub(crate) fn release(self: &Arc<Self>, active: Option<(Arc<Table>, Vec<Ipv4Addr>)>) {
-        let opened = active.is_some();
-        let syns = {
-            let mut waiting = self.waiting.lock().unwrap();
-            match active {
-                Some((table, held)) => waiting.activate(table, held),
-                None => std::mem::take(&mut waiting.syns),
-            }
-        };
-        let now = Instant::now();
-        for (packet, addr) in syns {
-            let Some(seg) = parse_tcp(&packet) else {
-                self.inject(&packet, &addr);
-                continue;
-            };
-            if opened {
-                self.on_tcp(None, &packet, &seg, addr);
-                continue;
-            }
-            self.nat.lock().unwrap().forget(seg.src.port());
-            let key = FlowKey {
-                protocol: Protocol::Tcp,
-                local_port: seg.src.port(),
-                dst: seg.dst,
-            };
-            let reason = DirectReason::Failed {
-                error: "the capture filter did not open".into(),
-            };
-            let mut stats = self.stats.lock().unwrap();
-            stats.set_via(key, Via::Direct { reason });
-            stats.close(key, now);
-            drop(stats);
-            self.inject(&packet, &addr);
-        }
-    }
-
-    /// Re-applies the rules with the names known now; a refused filter shows as the rules error.
-    pub(crate) fn recompose(self: &Arc<Self>) {
-        if self.is_stopped() {
-            return;
-        }
-        let error = self.apply(None).err();
-        if let Some(inner) = self.inner.upgrade() {
-            inner.rules.lock().unwrap().filter_error = error;
-        }
-    }
-
-    /// Spawns one `recompose` for any number of requests made before it starts.
-    pub(crate) fn recompose_soon(self: &Arc<Self>) {
-        if !self.recompose_pending.swap(true, Ordering::SeqCst) {
-            let l = self.clone();
-            spawn(move || l.recompose());
-        }
-    }
-
-    /// Records the addresses of names some rule wants; ends when the DNS handle shuts down.
-    pub(crate) fn dns_loop(self: &Arc<Self>, handle: &Handle) {
-        let mut buf = vec![0u8; MAX_PACKET];
-        while let Ok((n, _)) = handle.recv(&mut buf) {
-            let Some(answer) = parse_udp(&buf[..n]).and_then(|u| dns::parse(u.payload)) else {
-                continue;
-            };
-            if !self.base.lock().unwrap().wants(&answer.name) {
-                continue;
-            }
-            if self.names.lock().unwrap().record(&answer, Instant::now()) {
-                self.recompose();
+            for (opt, value) in [
+                (libc::TCP_KEEPIDLE, KEEPALIVE_SECS),
+                (libc::TCP_KEEPINTVL, 10),
+                (libc::TCP_KEEPCNT, 6),
+            ] {
+                libc::setsockopt(
+                    stream.as_raw_fd(),
+                    libc::IPPROTO_TCP,
+                    opt,
+                    (&raw const value).cast(),
+                    size_of::<libc::c_int>() as u32,
+                );
             }
         }
     }
 
-    /// Ends on the first connection after the session stopped (`shut` makes one).
-    pub(crate) fn accept_loop(self: &Arc<Self>) {
-        for conn in self.acceptor.incoming() {
-            if self.is_stopped() {
-                return;
-            }
-            match conn {
-                Ok(stream) => {
-                    let l = self.clone();
-                    spawn(move || l.relay_tcp(stream));
-                }
-                Err(_) => std::thread::sleep(Duration::from_millis(50)),
-            }
-        }
-    }
-
-    // ponytail: two threads per connection; a pool or IOCP if connections reach the hundreds.
-    fn relay_tcp(self: Arc<Self>, client: TcpStream) {
+    /// One redirected connection: decide its way from the table, the process behind the client
+    /// port and the proxy state, then relay it there.
+    pub(crate) fn handle_conn(self: &Arc<Self>, client: TcpStream) {
         let Ok(SocketAddr::V4(peer)) = client.peer_addr() else {
             return tcp::reset(client);
         };
-        let port = peer.port();
-        let orig = {
-            let mut nat = self.nat.lock().unwrap();
-            let orig = nat.original(port, *peer.ip());
-            if orig.is_some() {
-                nat.accepted(port);
-            }
-            orig
-        };
-        // Not a reflected connection: nobody from the LAN rides the proxy.
-        let Some(orig) = orig else {
+        let Ok(orig) = Self::original_dst(&client) else {
             return tcp::reset(client);
         };
+        let port = peer.port();
         let key = FlowKey {
             protocol: Protocol::Tcp,
             local_port: port,
             dst: orig,
         };
-        let domain = self.domain_of(orig, Instant::now());
-        let up = match socks::connect(self.proxy, orig, domain.as_deref(), OPEN_TIMEOUT) {
-            Ok(up) => up,
+        let table = self.table.read().unwrap().clone();
+        let pid = self.tcp_owners.pid(port, PID_WAIT, |p| {
+            owner::table_pid(Protocol::Tcp, p)
+        });
+        let exe = pid.and_then(|p| self.images.get(p));
+        let exe = exe.as_deref();
+        let rule = table
+            .matches_flow(Protocol::Tcp, orig, exe)
+            .map(str::to_owned);
+        let state = self.proxy_state.lock().unwrap().clone();
+        let proxy_pid = *self.proxy_pid.lock().unwrap();
+        let blocked = flows::decide(&state, pid, std::process::id(), proxy_pid);
+        let rule = rule.as_deref().unwrap_or("");
+        let mark_ok = self.mark_ok.load(Ordering::Relaxed);
+        if let Some(reason) = blocked {
+            if matches!(reason, DirectReason::Loop) && !mark_ok {
+                // A direct way out would come back to the acceptor: refuse instead of looping.
+                return tcp::reset(client);
+            }
+            return self.direct_flow(key, rule, exe, client, reason);
+        }
+        if !rule.is_empty() {
+            return self.proxy_flow(key, rule, exe, client);
+        }
+        if mark_ok {
+            return self.direct_flow(key, rule, exe, client, DirectReason::NoRule);
+        }
+        // Nothing says this connection must go direct, and a direct way out is not protected
+        // from coming back: the proxy takes it.
+        self.proxy_flow(key, rule, exe, client);
+    }
+
+    fn direct_flow(
+        self: &Arc<Self>,
+        key: FlowKey,
+        rule: &str,
+        exe: Option<&str>,
+        client: TcpStream,
+        reason: DirectReason,
+    ) {
+        match Self::connect_marked(key.dst, CONNECT_TIMEOUT) {
+            Ok((up, marked)) => {
+                if !marked {
+                    self.mark_ok.store(false, Ordering::Relaxed);
+                }
+                self.open_row(key, rule, exe, Via::Direct { reason }, Instant::now());
+                let _ = self.pipe_both(key, &client, &up);
+                self.end_conn(key);
+                self.stats.lock().unwrap().close(key, Instant::now());
+            }
+            Err(e) => {
+                self.direct_row(
+                    key,
+                    rule,
+                    exe,
+                    DirectReason::Failed { error: e.to_string() },
+                    Instant::now(),
+                );
+                tcp::reset(client);
+            }
+        }
+    }
+
+    fn proxy_flow(
+        self: &Arc<Self>,
+        key: FlowKey,
+        rule: &str,
+        exe: Option<&str>,
+        client: TcpStream,
+    ) {
+        let domain = self.domain_of(key.dst, Instant::now());
+        match socks::connect(self.proxy, key.dst, domain.as_deref(), OPEN_TIMEOUT) {
+            Ok(up) => {
+                self.open_row(key, rule, exe, Via::Proxy, Instant::now());
+                let _ = self.pipe_both(key, &client, &up);
+                self.end_conn(key);
+                self.stats.lock().unwrap().close(key, Instant::now());
+            }
             Err(e) => {
                 let now = Instant::now();
-                self.nat.lock().unwrap().mark_direct(orig, now);
                 // Ruling P6: a refused CONNECT is a failure, not "no UDP".
                 let reason = match e {
                     SocksError::Refused(_) => DirectReason::Failed {
@@ -312,31 +285,26 @@ impl Live {
                     },
                     _ => DirectReason::from(&e),
                 };
-                let mut stats = self.stats.lock().unwrap();
-                stats.set_via(key, Via::Direct { reason });
-                stats.close(key, now);
-                drop(stats);
+                self.direct_row(key, rule, exe, reason, now);
                 if matches!(e, SocksError::AuthRequired) {
                     self.set_proxy(ProxyState::AuthRequired);
                 }
-                return tcp::reset(client);
+                tcp::reset(client);
             }
-        };
-        self.stats.lock().unwrap().set_via(key, Via::Proxy);
-        let _ = self.pipe_both(key, &client, &up);
-        self.end_conn(key);
-        self.stats.lock().unwrap().close(key, Instant::now());
+        }
     }
 
-    /// Client to proxy on a new thread, proxy to client here. An error, a stop or a gone NAT entry
-    /// shuts both sockets down, which also ends the other direction; after an EOF the other
-    /// direction goes on (a half-close).
+    /// Client to the way out on a new thread, the way out to the client here. An error, a stop
+    /// or the session ending shuts both sockets down, which also ends the other direction; after
+    /// an EOF the other direction goes on (a half-close).
     fn pipe_both(
         self: &Arc<Self>,
         key: FlowKey,
         client: &TcpStream,
         up: &TcpStream,
     ) -> io::Result<()> {
+        Self::keepalive(client);
+        Self::keepalive(up);
         self.conns
             .lock()
             .unwrap()
@@ -344,96 +312,41 @@ impl Live {
         if self.is_stopped() {
             return Ok(()); // `shut` may have run before the insert
         }
-        let l = self.clone();
-        let stop = move || {
-            l.is_stopped()
-                || l.nat
-                    .lock()
-                    .unwrap()
-                    .original(key.local_port, *key.dst.ip())
-                    .is_none()
-        };
-        let (from, to, l, stop2) = (
-            client.try_clone()?,
-            up.try_clone()?,
-            self.clone(),
-            stop.clone(),
-        );
+        let (from, to, l, s2) = (client.try_clone()?, up.try_clone()?, self.clone(), self.clone());
         let upload = std::thread::spawn(move || {
-            let r = tcp::pipe(&from, &to, &stop2, &mut |n| {
+            let stop = move || s2.is_stopped();
+            let r = tcp::pipe(&from, &to, &stop, &mut |n| {
                 l.stats.lock().unwrap().add(key, n, 0, Instant::now());
             });
-            if r.is_err() || stop2() {
+            if r.is_err() || stop() {
                 l.end_conn(key);
             }
         });
-        let r = tcp::pipe(up, client, &stop, &mut |n| {
+        let r = tcp::pipe(up, client, &|| self.is_stopped(), &mut |n| {
             self.stats.lock().unwrap().add(key, 0, n, Instant::now());
         });
-        if r.is_err() || stop() {
+        if r.is_err() || self.is_stopped() {
             self.end_conn(key);
         }
         let _ = upload.join();
         Ok(())
     }
 
-    /// Shuts down both sockets of a proxied connection, which unblocks its pipes.
+    /// Shuts down both sockets of a relayed connection, which unblocks its pipes.
     fn end_conn(&self, key: FlowKey) {
         if let Some((a, b)) = self.conns.lock().unwrap().remove(&key) {
             let _ = a.shutdown(Shutdown::Both);
             let _ = b.shutdown(Shutdown::Both);
-        }
-    }
-
-    /// Expires names (not those of live flows) and NAT entries (their rows close, their relays
-    /// end), sends unaccepted SYNs' destinations direct, then rebuilds the filter (no reopen when
-    /// its text is the same).
-    pub(crate) fn tcp_tick(self: &Arc<Self>, now: Instant) {
-        // A live flow to an address known only from DNS keeps it captured (proxied UDP mid-call).
-        let mut live: Vec<_> = self
-            .flows
-            .lock()
-            .unwrap()
-            .keys()
-            .map(|k| *k.dst.ip())
-            .collect();
-        live.extend(
-            self.nat
+            // Its owner lookup must not answer for the next connection on the port.
+            let busy = self
+                .conns
                 .lock()
                 .unwrap()
-                .destinations()
-                .iter()
-                .map(|d| *d.ip()),
-        );
-        self.names.lock().unwrap().expire(now, &live);
-        let (gone, unaccepted) = {
-            let mut nat = self.nat.lock().unwrap();
-            (nat.expire(now), nat.unaccepted(now))
-        };
-        let key = |local_port, dst| FlowKey {
-            protocol: Protocol::Tcp,
-            local_port,
-            dst,
-        };
-        for (port, dst) in gone {
-            self.end_conn(key(port, dst));
-            self.stats.lock().unwrap().close(key(port, dst), now);
+                .keys()
+                .any(|k| k.local_port == key.local_port);
+            if !busy {
+                self.tcp_owners.forget(key.local_port);
+            }
         }
-        self.waiting.lock().unwrap().forget(&unaccepted);
-        for (port, dst) in unaccepted {
-            log::warn!(
-                "the local acceptor never saw the connection to {dst}: Windows Firewall may block \
-                 Zapret Hub; the address goes direct for 60 s"
-            );
-            let mut stats = self.stats.lock().unwrap();
-            stats.set_via(
-                key(port, dst),
-                Via::Direct {
-                    reason: DirectReason::NotAccepted,
-                },
-            );
-            stats.close(key(port, dst), now);
-        }
-        self.recompose();
     }
 }
