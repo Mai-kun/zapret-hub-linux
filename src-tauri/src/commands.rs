@@ -463,6 +463,25 @@ pub async fn get_exclusion_rules(handle: AppHandle) -> Answer<Vec<ExclusionRule>
 /// the nftables queue rewritten and the service restarted into it.
 #[tauri::command]
 #[specta::specta]
+pub async fn add_exclusion_preset(handle: AppHandle, name: String) -> Answer<ExclusionRule> {
+    blocking(move || {
+        let mut rules = actions::read_exclusion_rules(&app(&handle))?;
+        let preset_rule = crate::exclusions::default_rules()
+            .into_iter()
+            .find(|r| r.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Preset not found: {name}"))?;
+
+        if !rules.iter().any(|r| r.name == preset_rule.name) {
+            rules.push(preset_rule.clone());
+            actions::save_exclusion_rules(&handle, rules)?;
+        }
+        Ok(preset_rule)
+    })
+    .await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn save_exclusion_rules(handle: AppHandle, rules: Vec<ExclusionRule>) -> Answer<()> {
     blocking(move || actions::save_exclusion_rules(&handle, rules)).await
 }

@@ -13,9 +13,22 @@ use specta::Type;
 /// `data/exclusions.toml` next to the exe: portable, like everything else (spec 4.3).
 pub const FILE_NAME: &str = "exclusions.toml";
 
-/// The group created when there are no exclusions yet: these programs always go around zapret.
-pub const DEFAULT_NAME: &str = "🛡️ Программы без zapret";
+/// The groups created when there are no exclusions yet: these programs always go around zapret.
+pub const DEFAULT_NAME_APPS: &str = "🛡️ Программы без zapret";
 pub const DEFAULT_APPS: &[&str] = &["opencode", "opencode-cli"];
+
+pub const DEFAULT_NAME_RU: &str = "🇷🇺 Российские сайты и сервисы";
+pub const DEFAULT_DOMAINS_RU: &[&str] = &[
+    "gosuslugi.ru", "sberbank.ru", "tbank.ru", "tinkoff.ru", "vtb.ru",
+    "alfabank.ru", "avito.ru", "ozon.ru", "wildberries.ru", "kinopoisk.ru",
+    "yandex.ru", "ya.ru", "vk.com", "mail.ru", "rutube.ru"
+];
+
+pub const DEFAULT_NAME_LOCAL: &str = "🏠 Локальные и приватные сети";
+pub const DEFAULT_IPS_LOCAL: &[&str] = &["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "127.0.0.0/8"];
+
+pub const DEFAULT_NAME_P2P: &str = "⚡ Торренты и P2P-порты";
+pub const DEFAULT_PORTS_P2P: &[&str] = &["51413", "6881-6889"];
 
 /// Flat exclude lists of zapret2, derived from the enabled groups.
 pub const LIST_DOMAINS: &str = "list-exclude-user.txt";
@@ -140,28 +153,54 @@ impl ExclusionRules {
         out
     }
 
-    /// The group named {DEFAULT_NAME}, creating it at the end when missing.
+    /// The group named {DEFAULT_NAME_APPS}, creating it at the end when missing.
     #[allow(dead_code)] // the CLI talks to it through JSON; the app edits rules wholesale
     pub fn default_group(&mut self) -> &mut ExclusionRule {
         if let Some(position) = self
             .rules
             .iter()
-            .position(|rule| rule.name == DEFAULT_NAME)
+            .position(|rule| rule.name == DEFAULT_NAME_APPS)
         {
             return &mut self.rules[position];
         }
-        self.rules.push(default_rule());
+        self.rules.push(default_rule_apps());
         self.rules.last_mut().unwrap()
     }
 }
 
-fn default_rules() -> Vec<ExclusionRule> {
-    vec![default_rule()]
+pub(crate) fn default_rules() -> Vec<ExclusionRule> {
+    vec![
+        ExclusionRule {
+            name: DEFAULT_NAME_RU.to_owned(),
+            enabled: true,
+            domains: DEFAULT_DOMAINS_RU.iter().map(|d| d.to_string()).collect(),
+            ips: Vec::new(),
+            ports: Vec::new(),
+            apps: Vec::new(),
+        },
+        ExclusionRule {
+            name: DEFAULT_NAME_LOCAL.to_owned(),
+            enabled: true,
+            domains: Vec::new(),
+            ips: DEFAULT_IPS_LOCAL.iter().map(|i| i.to_string()).collect(),
+            ports: Vec::new(),
+            apps: Vec::new(),
+        },
+        ExclusionRule {
+            name: DEFAULT_NAME_P2P.to_owned(),
+            enabled: false,
+            domains: Vec::new(),
+            ips: Vec::new(),
+            ports: DEFAULT_PORTS_P2P.iter().map(|p| p.to_string()).collect(),
+            apps: Vec::new(),
+        },
+        default_rule_apps(),
+    ]
 }
 
-fn default_rule() -> ExclusionRule {
+fn default_rule_apps() -> ExclusionRule {
     ExclusionRule {
-        name: DEFAULT_NAME.to_owned(),
+        name: DEFAULT_NAME_APPS.to_owned(),
         enabled: true,
         domains: Vec::new(),
         ips: Vec::new(),
@@ -219,22 +258,19 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_gives_the_default_group_with_opencode() {
+    fn missing_file_gives_all_default_groups() {
         let dir = tmp_dir();
         let paths = crate::state::Paths {
             exe_dir: dir.path().to_path_buf(),
         };
         let rules = ExclusionRules::load(&paths).unwrap();
-        assert_eq!(rules.rules.len(), 1);
-        let rule = &rules.rules[0];
-        assert_eq!(rule.name, DEFAULT_NAME);
-        assert!(rule.enabled);
-        assert_eq!(rule.apps, DEFAULT_APPS);
-        assert!(rule.domains.is_empty() && rule.ips.is_empty() && rule.ports.is_empty());
+        assert_eq!(rules.rules.len(), 4);
+        assert!(rules.rules.iter().any(|r| r.name == DEFAULT_NAME_RU));
+        assert!(rules.rules.iter().any(|r| r.name == DEFAULT_NAME_APPS));
     }
 
     #[test]
-    fn empty_file_gives_the_default_group_too() {
+    fn empty_file_gives_all_default_groups_too() {
         let dir = tmp_dir();
         let path = dir.path().join(FILE_NAME);
         std::fs::write(&path, "").unwrap();
@@ -242,8 +278,7 @@ mod tests {
             exe_dir: dir.path().to_path_buf(),
         };
         let rules = ExclusionRules::load(&paths).unwrap();
-        assert_eq!(rules.rules.len(), 1);
-        assert_eq!(rules.rules[0].apps, DEFAULT_APPS);
+        assert_eq!(rules.rules.len(), 4);
     }
 
     #[test]
@@ -333,9 +368,9 @@ ports = ["443"]
             rules: vec![ExclusionRule { name: "other".into(), enabled: true, domains: Vec::new(), ips: Vec::new(), ports: Vec::new(), apps: Vec::new() }],
         };
         let group = rules.default_group();
-        assert_eq!(group.name, DEFAULT_NAME);
+        assert_eq!(group.name, DEFAULT_NAME_APPS);
         assert_eq!(group.apps, DEFAULT_APPS);
-        assert!(rules.rules.iter().any(|rule| rule.name == DEFAULT_NAME));
+        assert!(rules.rules.iter().any(|rule| rule.name == DEFAULT_NAME_APPS));
     }
 }
 

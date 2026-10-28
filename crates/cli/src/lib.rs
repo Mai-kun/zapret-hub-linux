@@ -96,6 +96,9 @@ pub enum Request {
     AddRoutePreset {
         preset: Preset,
     },
+    AddExclusionPreset {
+        name: String,
+    },
     RouteFlows {
         all: bool,
     },
@@ -350,6 +353,9 @@ mod tests {
             },
             Request::AddRoutePreset {
                 preset: Preset::DiscordVoice,
+            },
+            Request::AddExclusionPreset {
+                name: "test".into(),
             },
             Request::RouteFlows { all: true },
             Request::StartService,

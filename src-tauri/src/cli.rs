@@ -136,6 +136,9 @@ fn dispatch(app: &AppHandle, request: Request) -> Result<Value, String> {
         Request::AddRoutePreset { preset } => {
             json(block_on(commands::add_route_preset(handle, preset))?)
         }
+        Request::AddExclusionPreset { name } => {
+            json(block_on(commands::add_exclusion_preset(handle, name))?)
+        }
         Request::RouteFlows { all } => json(commands::route_flows(state, all)),
         Request::StartService => json(block_on(commands::start_service(handle))?),
         Request::StopService => json(block_on(commands::stop_service(handle))?),

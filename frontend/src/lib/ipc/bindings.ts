@@ -90,11 +90,12 @@ export const commands = {
 	openTgProxy: () => typedError<null, string>(__TAURI_INVOKE("open_tg_proxy")),
 	/**  The exclusions card's contents: the named groups of `data/exclusions.toml`. */
 	getExclusionRules: () => typedError<ExclusionRule[], string>(__TAURI_INVOKE("get_exclusion_rules")),
+	saveExclusionRules: (rules: ExclusionRule[]) => typedError<null, string>(__TAURI_INVOKE("save_exclusion_rules", { rules })),
 	/**
 	 *  The groups back onto `data/exclusions.toml`, the zapret2 lists and the settings' ports, then
 	 *  the nftables queue rewritten and the service restarted into it.
 	 */
-	saveExclusionRules: (rules: ExclusionRule[]) => typedError<null, string>(__TAURI_INVOKE("save_exclusion_rules", { rules })),
+	addExclusionPreset: (name: string) => typedError<ExclusionRule, string>(__TAURI_INVOKE("add_exclusion_preset", { name })),
 	quickCheck: () => typedError<QuickCheck, string>(__TAURI_INVOKE("quick_check")),
 	takeNotices: () => __TAURI_INVOKE<Notice[]>("take_notices"),
 	/**  The only command that writes `router_enabled` (`routing::set_enabled`). */

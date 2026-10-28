@@ -90,6 +90,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::open_tg_proxy,
             commands::get_exclusion_rules,
             commands::save_exclusion_rules,
+            commands::add_exclusion_preset,
             commands::quick_check,
             commands::take_notices,
             commands::set_router_enabled,

@@ -134,6 +134,19 @@
     flows = flows.filter((flow) => !flow.closed);
   }
 
+  const presetExclusions = [
+    { name: "🇷🇺 Российские сайты и сервисы", label: "🇷🇺 Российские сайты" },
+    { name: "🏠 Локальные и приватные сети", label: "🏠 Локальные сети" },
+    { name: "⚡ Торренты и P2P-порты", label: "⚡ Торренты и P2P" },
+    { name: "🛡️ Программы без zapret", label: "🛡️ Программы без zapret" },
+  ];
+
+  async function addExclusionPreset(name: string): Promise<void> {
+    await change(S.failed.preset, () => commands.addExclusionPreset(name));
+    const read = await call(S.failed.exclusions, commands.getExclusionRules());
+    if (read) exclusions = read;
+  }
+
   // ————— the exclusions card —————
 
   /** One entry per line, blanks gone. */
@@ -397,6 +410,15 @@
         <div class="buttons">
           <button disabled={app.busy} onclick={() => editExclusion(null)}>{S.routes.exclusions.add}</button>
           {#if exclusionsSaved}<span class="ok">{S.routes.exclusions.saved}</span>{/if}
+        </div>
+        <div class="row chips" style="margin-top: 10px;">
+          <span class="muted">+ Пресеты:</span>
+          {#each presetExclusions as preset}
+            <button
+              disabled={app.busy || exclusions?.some((r) => r.name === preset.name)}
+              onclick={() => addExclusionPreset(preset.name)}>{preset.label}</button
+            >
+          {/each}
         </div>
       {:else}
         <p class="muted">{S.common.loading}</p>
