@@ -32,9 +32,12 @@ pub fn start_monitor(handle: AppHandle, state: &AppState) -> mpsc::Sender<()> {
     *state.monitor_wake.lock().unwrap() = Some(tx.clone());
     std::thread::spawn(move || {
         log::info!("exclusions monitor: watching for {}", exclusions::DEFAULT_APPS.join(", "));
+        // True until the first empty tick: the sets may still hold the ports of a run before
+        // this one, so the first tick must flush even when nothing matches.
+        let mut populated = true;
         loop {
             let _ = rx.recv_timeout(TICK);
-            if let Err(err) = sync_once(&handle) {
+            if let Err(err) = sync_once(&handle, &mut populated) {
                 log::warn!("exclusions monitor: {err:#}");
             }
         }
@@ -43,11 +46,14 @@ pub fn start_monitor(handle: AppHandle, state: &AppState) -> mpsc::Sender<()> {
 }
 
 /// One tick: read the groups, move matching processes into the cgroup, refresh the port sets.
-fn sync_once(handle: &AppHandle) -> anyhow::Result<()> {
+/// Nothing runs the `/proc` scan or a single `nft` while the groups hold no apps.
+fn sync_once(handle: &AppHandle, populated: &mut bool) -> anyhow::Result<()> {
     let state = actions::state(handle);
     let saved = exclusions::ExclusionRules::load(&state.paths)?;
     let apps: Vec<String> = saved.enabled_apps();
     if apps.is_empty() {
+        // The groups went away: what their ports left in the sets is flushed once, then silence.
+        update_port_sets(&[], populated);
         return Ok(());
     }
 
@@ -65,7 +71,7 @@ fn sync_once(handle: &AppHandle) -> anyhow::Result<()> {
             &["-c", &format!("printf '%s\\n' {list} > {CGROUP}/cgroup.procs")],
         );
     }
-    update_port_sets(&pids);
+    update_port_sets(&pids, populated);
     Ok(())
 }
 
@@ -218,9 +224,15 @@ fn net_nodes() -> (HashMap<u64, u16>, HashMap<u64, u16>) {
 }
 
 /// Replaces the set's contents with `ports`; an empty list just flushes the set. A missing table
-/// (zapret not applied yet) is silently skipped: the next tick tries again.
-fn update_port_sets(pids: &[u32]) {
+/// (zapret not applied yet) is silently skipped: the next tick tries again. `populated` says the
+/// sets may still hold ports of an earlier tick: when nothing matched and they cannot, the two
+/// `nft` spawns (and the `/proc/net` reads) are skipped too.
+fn update_port_sets(pids: &[u32], populated: &mut bool) {
+    if pids.is_empty() && !*populated {
+        return;
+    }
     let (tcp, udp) = open_ports(pids);
+    *populated = !tcp.is_empty() || !udp.is_empty();
     set_elements("bypass_tcp_ports", &tcp);
     set_elements("bypass_udp_ports", &udp);
 }
