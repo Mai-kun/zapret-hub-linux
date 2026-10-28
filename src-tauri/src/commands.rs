@@ -492,11 +492,12 @@ pub async fn flush_dns() -> Answer<()> {
     blocking(zapret::hosts::flush_dns).await
 }
 
-/// `doctor`: every subsystem at once, with what to fix.
+/// `doctor`: every subsystem at once, with what to fix. Off the main thread: a sync command
+/// would hold the window for the whole run of external checks.
 #[tauri::command]
 #[specta::specta]
-pub fn doctor(handle: AppHandle) -> Answer<diag::DoctorReport> {
-    Ok(diag::doctor(&handle))
+pub async fn doctor(handle: AppHandle) -> Answer<diag::DoctorReport> {
+    blocking(move || Ok(diag::doctor(&handle))).await
 }
 
 /// One remedy of `doctor`: the action runs, then the report is taken again so the page can drop
@@ -544,6 +545,14 @@ pub async fn fix_all_doctor_issues(handle: AppHandle) -> Answer<diag::DoctorRepo
 #[specta::specta]
 pub fn probe(handle: AppHandle, target: String) -> Answer<diag::ProbeResult> {
     Ok(diag::probe(&handle, &target))
+}
+
+/// `diagnose_service`: the deep diagnosis of a service's real traffic — Discord voice UDP and
+/// the gateway WebSocket, a YouTube video chunk — with an expert verdict per component.
+#[tauri::command]
+#[specta::specta]
+pub async fn diagnose_service(service: diag::DiagnosticTarget) -> Answer<diag::ServiceDiagnosticsReport> {
+    blocking(move || Ok(diag::diagnose_service(service))).await
 }
 
 /// The TG WS Proxy card's contents: the binary on the disk, systemd and the journal in one go.

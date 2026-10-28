@@ -145,6 +145,12 @@ pub enum Request {
     ProbeTarget {
         target: String,
     },
+    /// The deep diagnosis of a service's real traffic (`diagnose_service`): `discord`,
+    /// `youtube` or `games`.
+    #[serde(rename = "diagnose_service")]
+    ProbeService {
+        service: String,
+    },
 }
 
 impl Request {
@@ -390,6 +396,9 @@ mod tests {
             Request::FixAllDoctorIssues,
             Request::ProbeTarget {
                 target: "https://gateway.discord.gg".into(),
+            },
+            Request::ProbeService {
+                service: "discord".into(),
             },
         ]
     }

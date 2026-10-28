@@ -109,10 +109,18 @@ export const commands = {
 	deleteRoute: (name: string) => typedError<null, string>(__TAURI_INVOKE("delete_route", { name })),
 	addRoutePreset: (preset: Preset) => typedError<Rule, string>(__TAURI_INVOKE("add_route_preset", { preset })),
 	routeFlows: (all: boolean) => __TAURI_INVOKE<FlowRow[]>("route_flows", { all }),
-	/**  `doctor`: every subsystem at once, with what to fix. */
+	/**
+	 *  `doctor`: every subsystem at once, with what to fix. Off the main thread: a sync command
+	 *  would hold the window for the whole run of external checks.
+	 */
 	doctor: () => typedError<DoctorReport, string>(__TAURI_INVOKE("doctor")),
 	/**  `probe` of one domain or URL: DNS, the lists, the routing rule, HTTP/TLS and a ping. */
 	probe: (target: string) => typedError<ProbeResult, string>(__TAURI_INVOKE("probe", { target })),
+	/**
+	 *  `diagnose_service`: the deep diagnosis of a service's real traffic — Discord voice UDP and
+	 *  the gateway WebSocket, a YouTube video chunk — with an expert verdict per component.
+	 */
+	diagnoseService: (service: DiagnosticTarget) => typedError<ServiceDiagnosticsReport, string>(__TAURI_INVOKE("diagnose_service", { service })),
 	/**
 	 *  One remedy of `doctor`: the action runs, then the report is taken again so the page can drop
 	 *  the issue it just fixed (and show what is left).
@@ -263,6 +271,9 @@ export type DepsDiag = {
 export type Detected = {
 	zapret2: string | null,
 };
+
+/**  The services `diagnose_service` runs its real-traffic probes against. */
+export type DiagnosticTarget = "discord" | "youtube" | "games";
 
 export type DirectReason = { kind: "ProxyDown" } | { kind: "AuthRequired" } | { kind: "NoUdp" } | { kind: "Timeout" } | { kind: "Failed"; error: string } | { kind: "Loop" } | 
 /**  The address is sent direct for a while after the proxy refused a connection to it. */
@@ -670,7 +681,10 @@ export type RouterStatus = {
 export type RoutesView = {
 	rules: RuleRow[],
 	error: string | null,
-	/**  Windows resolves names over DNS over HTTPS: domain rules see no answers. */
+	/**
+	 *  The system resolves names over encrypted DNS: the sniffer sees no answers and domain
+	 *  rules match nothing until an app resolves them in the clear.
+	 */
 	system_doh: boolean,
 };
 
@@ -721,11 +735,29 @@ export type Score = {
 	youtube: ProfileScore,
 };
 
+/**  One component of a service (text API, voice, video stream): what answered and what it said. */
+export type ServiceComponent = {
+	name: string,
+	ok: boolean,
+	detail: string,
+};
+
 export type ServiceDiag = {
 	name: string,
 	state: SvcState,
 	strategy: string | null,
 	game_filter: boolean,
+};
+
+/**
+ *  The deep diagnosis of one service: every component's state and the expert verdict with the
+ *  ready advice — what to switch when a component is down.
+ */
+export type ServiceDiagnosticsReport = {
+	service: DiagnosticTarget,
+	components: ServiceComponent[],
+	verdict: string,
+	total_ms: number,
 };
 
 export type Settings = {

@@ -1,15 +1,23 @@
+<script lang="ts" module>
+  import type { DoctorReport } from "$lib/ipc/bindings";
+
+  /** The last report in memory: the tab opens on it at once and refreshes in the background. */
+  let last: DoctorReport | null = null;
+</script>
+
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { commands, type CheckStatus, type DoctorReport, type FixAction, type ProbeResult } from "$lib/ipc/bindings";
+  import { commands, type CheckStatus, type DiagnosticTarget, type FixAction, type ProbeResult, type ServiceDiagnosticsReport } from "$lib/ipc/bindings";
   import { call } from "$lib/api";
   import { app, change } from "$lib/app.svelte";
   import { S } from "$lib/strings";
 
-  let report = $state<DoctorReport | null>(null);
+  let report = $state(last);
   let checking = $state(false);
   let target = $state("");
   let result = $state<ProbeResult | null>(null);
   let probeBusy = $state(false);
+  let serviceReport = $state<ServiceDiagnosticsReport | null>(null);
+  let serviceBusy = $state<DiagnosticTarget | null>(null);
 
   /** The quick targets of the Probe block: chip label → what is probed. */
   const CHIPS: Array<[string, string]> = [
@@ -47,6 +55,17 @@
       target = subject;
     } finally {
       probeBusy = false;
+    }
+  }
+
+  /** The deep diagnosis of one service's real traffic: voice UDP, WebSocket, a video chunk. */
+  async function diagnoseService(service: DiagnosticTarget): Promise<void> {
+    serviceBusy = service;
+    try {
+      serviceReport =
+        (await call(S.failed.doctor, commands.diagnoseService(service))) ?? serviceReport;
+    } finally {
+      serviceBusy = null;
     }
   }
 
@@ -154,14 +173,27 @@
     return cells;
   }
 
-  onMount(() => void doctor());
+  // The report is mirrored out so a remount (wizard, reload) starts from it too.
+  $effect(() => {
+    last = report;
+  });
+
+  // The tab opens on the cached report at once and refreshes in the background: the checks are
+  // external commands and network, the switch itself must not wait for them. Every visit to the
+  // tab refreshes, `checking` only marks the running update.
+  $effect(() => {
+    if (app.tab === "diagnostics") void doctor();
+  });
 </script>
 
 <div class="row spread">
   <h1>{S.tabs.diagnostics}</h1>
-  <button disabled={checking || app.busy} onclick={() => void doctor()}>
-    {checking ? S.diagnostics.checking : S.diagnostics.check}
-  </button>
+  <div class="row">
+    {#if checking && report}<span class="muted">{S.diagnostics.checking}</span>{/if}
+    <button disabled={checking || app.busy} onclick={() => void doctor()}>
+      {checking ? S.diagnostics.checking : S.diagnostics.check}
+    </button>
+  </div>
 </div>
 
 {#if report}
@@ -227,6 +259,42 @@
         </button>
       {/each}
     </div>
+
+    <!-- Интерактивные сценарии: углублённая диагностика реального трафика -->
+    <div class="chips">
+      <button class="badge" disabled={serviceBusy !== null || app.busy}
+        onclick={() => void diagnoseService("discord")}>
+        {serviceBusy === "discord" ? S.diagnostics.serviceDiag.running : S.diagnostics.serviceDiag.discord}
+      </button>
+      <button class="badge" disabled={serviceBusy !== null || app.busy}
+        onclick={() => void diagnoseService("youtube")}>
+        {serviceBusy === "youtube" ? S.diagnostics.serviceDiag.running : S.diagnostics.serviceDiag.youtube}
+      </button>
+      <button class="badge" disabled={serviceBusy !== null || app.busy}
+        onclick={() => void diagnoseService("games")}>
+        {serviceBusy === "games" ? S.diagnostics.serviceDiag.running : S.diagnostics.serviceDiag.games}
+      </button>
+    </div>
+
+    {#if serviceReport}
+      <div class="service-report">
+        <h3>
+          {#if serviceReport.service === "discord"}🎧 Discord{:else if serviceReport.service === "youtube"}🎬 YouTube{:else}🎮 Игры{/if}
+          <span class="muted">{S.diagnostics.serviceDiag.total(serviceReport.total_ms)}</span>
+        </h3>
+        <div class="chips">
+          {#each serviceReport.components as comp (comp.name)}
+            <span class="badge {comp.ok ? 'ok' : 'bad'}">
+              {comp.ok ? "🟢" : "🔴"} {comp.name}: {comp.detail}
+            </span>
+          {/each}
+        </div>
+        <div class="verdict">
+          <strong>{S.diagnostics.serviceDiag.verdict}</strong>
+          <p>{serviceReport.verdict}</p>
+        </div>
+      </div>
+    {/if}
 
     {#if result}
       <div class="probe">
@@ -383,5 +451,32 @@
 
   .probe-part {
     margin-top: 6px;
+  }
+
+  .service-report {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .service-report h3 {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 14px;
+  }
+
+  .verdict {
+    margin-top: 4px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--ok, green);
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+
+  .verdict p {
+    margin: 4px 0 0;
+    font-size: 13px;
   }
 </style>

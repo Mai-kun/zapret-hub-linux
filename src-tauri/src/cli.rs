@@ -160,7 +160,7 @@ fn dispatch(app: &AppHandle, request: Request) -> Result<Value, String> {
         Request::SaveTgWsConfig { port, secret, args } => {
             json(block_on(commands::save_tg_ws_config(handle, port, secret, args))?)
         }
-        Request::Doctor => json(commands::doctor(handle)?),
+        Request::Doctor => json(block_on(commands::doctor(handle))?),
         Request::FixDoctorIssue { action } => {
             let action = serde_json::from_value(action)
                 .map_err(|err| format!("the fix action does not parse: {err}"))?;
@@ -170,6 +170,11 @@ fn dispatch(app: &AppHandle, request: Request) -> Result<Value, String> {
             json(block_on(commands::fix_all_doctor_issues(handle))?)
         }
         Request::ProbeTarget { target } => json(commands::probe(handle, target)?),
+        Request::ProbeService { service } => {
+            let service = serde_json::from_value(serde_json::Value::String(service))
+                .map_err(|err| format!("the service does not parse: {err}"))?;
+            json(block_on(commands::diagnose_service(service))?)
+        }
     }
 }
 

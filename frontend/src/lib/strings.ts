@@ -618,6 +618,15 @@ export const S = {
     noIssues: "Проблем не найдено.",
     fix: "Исправить",
     fixAll: "Исправить всё автоматически",
+    serviceDiag: {
+      discord: "🎧 Полная диагностика Discord",
+      youtube: "🎬 Тест видеопотока YouTube",
+      games: "🎮 Проверка игровых сервисов",
+      running: "Диагностирую…",
+      verdict: "Экспертный вердикт",
+      failed: (error: string) => `Диагностика не прошла: ${error}`,
+      total: (ms: number) => `Заняло ${ms} мс`,
+    },
     checkpoints: {
       systemDns: "Системный DNS",
       systemOk: "резолвер ОС отвечает",

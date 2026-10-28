@@ -261,22 +261,66 @@ pub struct Checks {
 }
 
 /// The whole report. Every issue carries its own remedy, so the answer is the state and the
-/// fix in one JSON.
+/// fix in one JSON. The checks run on four parallel threads: the report takes the time of the
+/// slowest network answer, not of all the external commands added up.
 pub fn doctor(app: &AppHandle) -> DoctorReport {
     let state = actions::state(app);
     let settings = state.settings();
     let mut issues = Vec::new();
 
-    let system_dns = system_dns(&mut issues);
-    let opened = state.engine2();
-    let service = service_diag(&settings, &mut issues);
-    let (engine, opened) = engine_diag(opened, &mut issues);
-    let lists_and_bins = lists_and_bins(&opened, &service, &mut issues);
-    let nfqueue = nfqueue(&service, &mut issues);
-    let nftables = nftables(&service, &mut issues);
-    let conflicts = conflicts(&service, &mut issues);
-    let proxies = proxies(app, &settings, &mut issues);
-    let (distro, deps) = deps_diag(&mut issues);
+    // The service's name, state and strategy are what three other checks read: `systemctl`
+    // answers in milliseconds, so it goes before the parallel block.
+    let (service, mut own) = gather(|issues| service_diag(&settings, issues));
+    issues.append(&mut own);
+
+    let (
+        (system_dns, proxies, mut net_issues),
+        (engine, distro, deps, mut sys_issues),
+        (nfqueue, nft, conflicts, mut nft_issues),
+        (lists, mut disk_issues),
+    ) = thread::scope(|s| {
+        // D: the network — the resolvers and the SOCKS5 greeting, each on its own clock.
+        let net = s.spawn(|| {
+            let (system_dns, mut iss) = gather(system_dns);
+            let (proxies, mut more) = gather(|issues| proxies(app, &settings, issues));
+            iss.append(&mut more);
+            (system_dns, proxies, iss)
+        });
+        // A: the system calls — the engine's rights (`getcap`), the tools, the sysctls.
+        let sys = s.spawn(|| {
+            // The engine itself thread C opens again: `Engine::open` is a few file stats.
+            let (engine, mut iss) = gather(|issues| engine_diag(state.engine2(), issues));
+            let ((distro, deps), mut more) = gather(deps_diag);
+            iss.append(&mut more);
+            (engine, distro, deps, iss)
+        });
+        // B: nftables — the table, the queue and the conflicts, three `nft` runs together.
+        let nft = s.spawn(|| {
+            let (nfqueue, mut iss) = gather(|issues| nfqueue(&service, issues));
+            let (table, mut more) = gather(|issues| nftables(&service, issues));
+            let (conflicts, mut rest) = gather(|issues| conflicts(&service, issues));
+            iss.append(&mut more);
+            iss.append(&mut rest);
+            (nfqueue, table, conflicts, iss)
+        });
+        // C: the disk — the lists' counts and the `.bin` sizes.
+        let disk = s.spawn(|| {
+            let engine = state.engine2().ok().flatten();
+            let (lists, iss) = gather(|issues| lists_and_bins(&engine, &service, issues));
+            (lists, iss)
+        });
+        (
+            net.join().unwrap(),
+            sys.join().unwrap(),
+            nft.join().unwrap(),
+            disk.join().unwrap(),
+        )
+    });
+    issues.append(&mut net_issues);
+    issues.append(&mut sys_issues);
+    issues.append(&mut nft_issues);
+    issues.append(&mut disk_issues);
+
     let tcp_timestamps = service::tcp_timestamps();
     if tcp_timestamps == Some(false) {
         issue(
@@ -302,10 +346,10 @@ pub fn doctor(app: &AppHandle) -> DoctorReport {
     DoctorReport {
         system_dns,
         engine,
-        lists_and_bins,
+        lists_and_bins: lists,
         service,
         nfqueue,
-        nftables,
+        nftables: nft,
         conflicts,
         proxies,
         tcp_timestamps,
@@ -314,6 +358,14 @@ pub fn doctor(app: &AppHandle) -> DoctorReport {
         deps,
         issues,
     }
+}
+
+/// A check's value and the issues it gathered on its own thread: the parallel checks cannot
+/// share one `Vec`, so each collects its own and the report merges them in the end.
+fn gather<T>(run: impl FnOnce(&mut Vec<Issue>) -> T) -> (T, Vec<Issue>) {
+    let mut issues = Vec::new();
+    let value = run(&mut issues);
+    (value, issues)
 }
 
 /// A helper that keeps the remedy attached to its text: `fix` is None for what only advice can
@@ -481,10 +533,7 @@ fn restore_service(state: &AppState, issues: &mut Vec<Issue>) {
 }
 
 /// The engine, its rights and its capabilities; each refusal becomes the remedy next to it.
-fn engine_diag(
-    engine: anyhow::Result<Option<Engine>>,
-    issues: &mut Vec<Issue>,
-) -> (EngineDiag, Option<Engine>) {
+fn engine_diag(engine: anyhow::Result<Option<Engine>>, issues: &mut Vec<Issue>) -> EngineDiag {
     let engine = match engine {
         Ok(Some(engine)) => engine,
         Ok(None) => {
@@ -493,11 +542,11 @@ fn engine_diag(
                 "the zapret2 folder is not set: choose it in Zapret Hub → Settings".to_owned(),
                 None,
             );
-            return (empty_engine(None), None);
+            return empty_engine(None);
         }
         Err(err) => {
             issue(issues, format!("{err:#}"), None);
-            return (empty_engine(Some(format!("{err:#}"))), None);
+            return empty_engine(Some(format!("{err:#}")));
         }
     };
     let exe = engine.exe();
@@ -527,29 +576,23 @@ fn engine_diag(
                 None,
             );
         }
-        (
-            EngineDiag {
-                path: Some(path),
-                error: None,
-                version,
-                executable,
-                cap_net_admin,
-                cap_net_raw,
-            },
-            Some(engine),
-        )
+        EngineDiag {
+            path: Some(path),
+            error: None,
+            version,
+            executable,
+            cap_net_admin,
+            cap_net_raw,
+        }
     } else {
-        (
-            EngineDiag {
-                path: Some(path),
-                error: None,
-                version,
-                executable: true,
-                cap_net_admin: false,
-                cap_net_raw: false,
-            },
-            Some(engine),
-        )
+        EngineDiag {
+            path: Some(path),
+            error: None,
+            version,
+            executable: true,
+            cap_net_admin: false,
+            cap_net_raw: false,
+        }
     }
 }
 
@@ -895,26 +938,34 @@ fn conflicts(service: &ServiceDiag, issues: &mut Vec<Issue>) -> Conflicts {
     Conflicts { processes, tables }
 }
 
+/// The SOCKS5 greeting gets this long: `doctor` runs on every open of the tab, a dead proxy
+/// must not hold the report for the seconds a full curl round trip takes.
+const SOCKS_BUDGET: Duration = Duration::from_millis(300);
+
 /// The two proxies: does the SOCKS5 in the settings answer, and tg-ws take its port.
 fn proxies(app: &AppHandle, settings: &Settings, issues: &mut Vec<Issue>) -> ProxiesDiag {
     let socks = match &settings.socks5 {
         Some(addr) => {
-            let status = probe::socks::check(addr);
-            if !status.ok {
+            // A greeting is the whole truth the report needs: a full curl round trip of the
+            // settings tab would hold the report on a dead proxy.
+            let ok = probe::socks::handshake(addr, SOCKS_BUDGET);
+            if !ok {
                 issue(
                     issues,
                     format!(
-                        "the SOCKS5 proxy {addr} does not answer: {} — check that it runs and the \
-                         address holds, or clear it in Settings",
-                        status.error.as_deref().unwrap_or("no greeting")
+                        "the SOCKS5 proxy {addr} does not answer within {} ms: check that it \
+                         runs and the address holds, or clear it in Settings",
+                        SOCKS_BUDGET.as_millis()
                     ),
                     None,
                 );
             }
             SocksDiag {
                 set: true,
-                ok: status.ok,
-                error: status.error,
+                ok,
+                error: (!ok).then(|| {
+                    format!("no SOCKS5 greeting within {} ms", SOCKS_BUDGET.as_millis())
+                }),
             }
         }
         None => SocksDiag {
@@ -1504,9 +1555,286 @@ fn plain(kind: CheckKind) -> CheckResult {
     }
 }
 
+// --- service diagnostics ---------------------------------------------------------------------------------
+
+/// The services `diagnose_service` runs its real-traffic probes against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "lowercase")]
+pub enum DiagnosticTarget {
+    Discord,
+    YouTube,
+    Games,
+}
+
+/// One component of a service (text API, voice, video stream): what answered and what it said.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+pub struct ServiceComponent {
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+/// The deep diagnosis of one service: every component's state and the expert verdict with the
+/// ready advice — what to switch when a component is down.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+pub struct ServiceDiagnosticsReport {
+    pub service: DiagnosticTarget,
+    pub components: Vec<ServiceComponent>,
+    pub verdict: String,
+    pub total_ms: u32,
+}
+
+/// The deep diagnosis of a real service's traffic: HTTPS, the gateway WebSocket and the voice
+/// UDP for Discord; the site and a real 128 KiB video chunk for YouTube; the game servers for
+/// Games. The components run in parallel, the verdict assembles afterwards.
+pub fn diagnose_service(service: DiagnosticTarget) -> ServiceDiagnosticsReport {
+    let started = Instant::now();
+    let (components, verdict) = match service {
+        DiagnosticTarget::Discord => discord_report(),
+        DiagnosticTarget::YouTube => youtube_report(),
+        DiagnosticTarget::Games => games_report(),
+    };
+    ServiceDiagnosticsReport {
+        service,
+        components,
+        verdict,
+        total_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+    }
+}
+
+/// The voice probe's deadline: three relays × two ports at most, three seconds each would drag
+/// the whole report; a silent relay has answered nothing by half a second's second try.
+const VOICE_TIMEOUT: Duration = Duration::from_secs(2);
+const STREAM_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn discord_report() -> (Vec<ServiceComponent>, String) {
+    use probe::discord_voice::{VoiceStatus, WsStatus};
+    let (https_main, https_gateway, ws, voice) = thread::scope(|s| {
+        let main = s.spawn(|| curl::check("https://discord.com", CheckKind::Tls13, None));
+        let gateway = s.spawn(|| curl::check("https://gateway.discord.gg", CheckKind::Tls13, None));
+        let ws = s.spawn(|| probe::discord_voice::check_discord_websocket(VOICE_TIMEOUT));
+        let voice = s.spawn(|| probe::discord_voice::check_discord_udp_any(VOICE_TIMEOUT));
+        (
+            main.join().unwrap_or_else(|_| plain(CheckKind::Tls13)),
+            gateway.join().unwrap_or_else(|_| plain(CheckKind::Tls13)),
+            ws.join().expect("the WebSocket check does not panic"),
+            voice.join().expect("the voice check does not panic"),
+        )
+    });
+    let https_ok = https_main.status == CheckStatus::Ok;
+    let gateway_ok = https_gateway.status == CheckStatus::Ok;
+    let ws_ok = ws.status == WsStatus::Ok;
+    let voice_ok = voice.status == VoiceStatus::Ok;
+    let voice_detail = match voice.status {
+        VoiceStatus::Ok => format!(
+            "OK {} мс, внешний адрес {}:{}",
+            voice.time_ms.unwrap_or_default(),
+            voice.external_ip.as_deref().unwrap_or("?"),
+            voice.external_port.unwrap_or_default()
+        ),
+        _ => voice.detail.clone(),
+    };
+    // When the WebSocket died, the plain TLS of the same edge tells whether the reset is in the
+    // upgrade or already in the handshake.
+    let ws_detail = if ws_ok || gateway_ok {
+        ws.detail.clone()
+    } else {
+        format!("{} (HTTPS шлюза тоже не проходит)", ws.detail)
+    };
+    let components = vec![
+        ServiceComponent {
+            name: "Текстовый API (HTTPS)".to_owned(),
+            ok: https_ok,
+            detail: https_main.stderr.trim().is_empty().then(|| format!("HTTP {} за {} мс", https_main.http_code, https_main.time_ms.unwrap_or_default())).unwrap_or_else(|| https_main.stderr.clone()),
+        },
+        ServiceComponent {
+            name: "Шлюз WebSockets".to_owned(),
+            ok: ws_ok,
+            detail: format!("{:?}: {}", ws.status, ws_detail),
+        },
+        ServiceComponent {
+            name: "Голосовой канал (UDP WebRTC)".to_owned(),
+            ok: voice_ok,
+            detail: format!("{}:{} — {}", voice.endpoint, voice.port, voice_detail),
+        },
+    ];
+    (components, discord_verdict(https_ok, ws_ok, voice_ok, &voice))
+}
+
+/// The expert verdict of the Discord diagnosis: chat without voice, voice without chat, and so
+/// on — each with what to switch.
+fn discord_verdict(
+    https_ok: bool,
+    ws_ok: bool,
+    voice_ok: bool,
+    voice: &probe::discord_voice::VoiceCheckResult,
+) -> String {
+    use probe::discord_voice::VoiceStatus;
+    if https_ok && ws_ok && voice_ok {
+        return "Discord полностью исправен: чат, шлюз и голосовые каналы доступны".to_owned();
+    }
+    if !https_ok {
+        return "Текстовый API Discord не отвечает: проверьте системный DNS и применённую \
+                стратегию — без HTTPS не заработает и голос"
+            .to_owned();
+    }
+    if !voice_ok && voice.status == VoiceStatus::Timeout {
+        return "Текстовый чат работает, но голосовые серверы WebRTC заблокированы провайдером. \
+                Решение: смените стратегию (например, на ALT11/ALT12 с другим фейком) или \
+                включите правило «Discord голос» во вкладке Маршруты"
+            .to_owned();
+    }
+    if !voice_ok && voice.status == VoiceStatus::Error {
+        return format!(
+            "Голосовой релей проверить не удалось: Discord выдаёт адрес *.discord.media на \
+             время сессии, и ни один известный релей не разрешился. Откройте голосовой канал в \
+             Discord и повторите диагностику — тогда проба дойдёт до настоящего релея"
+        );
+    }
+    if !ws_ok {
+        return "Шлюз WebSocket сбрасывает соединение (RST от ТСПУ или файрвола): текстовый чат \
+                будет отваливаться. Решение: смените стратегию или добавьте gateway.discord.gg \
+                в правило маршрутизации"
+            .to_owned();
+    }
+    if !voice_ok {
+        return format!(
+            "Голосовой сервер {}:{} ответил ошибкой: {}. Проверьте, не стоит ли релей в \
+             исключениях, и смените порт правила «Discord голос»",
+            voice.endpoint, voice.port, voice.detail
+        );
+    }
+    "Discord отвечает частично: сверьте компоненты отчёта с вердиктами выше".to_owned()
+}
+
+fn youtube_report() -> (Vec<ServiceComponent>, String) {
+    use probe::discord_voice::YoutubeStreamStatus;
+    let (site, stream) = thread::scope(|s| {
+        let site = s.spawn(|| curl::check("https://www.youtube.com", CheckKind::Tls13, None));
+        let stream =
+            s.spawn(|| probe::discord_voice::check_youtube_stream(None, probe::discord_voice::SAMPLE_VIDEO_ID, STREAM_TIMEOUT));
+        (
+            site.join().unwrap_or_else(|_| plain(CheckKind::Tls13)),
+            stream.join().expect("the stream check does not panic"),
+        )
+    });
+    let site_ok = site.status == CheckStatus::Ok;
+    let stream_ok = stream.status == YoutubeStreamStatus::Ok;
+    let speed = stream
+        .speed_kbps
+        .map(|kbps| format!("{kbps} КБ/с"))
+        .unwrap_or_else(|| "—".to_owned());
+    let components = vec![
+        ServiceComponent {
+            name: "Интерфейс (HTTPS)".to_owned(),
+            ok: site_ok,
+            detail: format!("HTTP {} за {} мс", site.http_code, site.time_ms.unwrap_or_default()),
+        },
+        ServiceComponent {
+            name: "Видеопоток (128 КБ Chunk)".to_owned(),
+            ok: stream_ok,
+            detail: format!(
+                "{:?}: {}, скорость {speed}",
+                stream.status, stream.detail
+            ),
+        },
+    ];
+    (components, youtube_verdict(site_ok, &stream))
+}
+
+fn youtube_verdict(site_ok: bool, stream: &probe::discord_voice::YoutubeStreamResult) -> String {
+    use probe::discord_voice::YoutubeStreamStatus;
+    if site_ok && stream.status == YoutubeStreamStatus::Ok {
+        // The chunk came through; whether it measured googlevideo itself or the fallback CDN
+        // host the player API decides.
+        if stream.host.as_deref().is_some_and(|host| host.contains("googlevideo")) {
+            return format!(
+                "YouTube полностью исправен: интерфейс и видеопоток googlevideo доступны ({}, {} КБ/с)",
+                stream.downloaded_bytes, stream.speed_kbps.unwrap_or_default()
+            );
+        }
+        return format!(
+            "Интерфейс YouTube и CDN Google доступны ({}, {} КБ/с), но плеер API не выдал \
+             адрес googlevideo — проверить сам видеопоток не вышло. Если видео всё же \
+             зависает на первых кадрах, берите стратегию с fake quic",
+            stream.downloaded_bytes, stream.speed_kbps.unwrap_or_default()
+        );
+    }
+    if !site_ok {
+        return "Интерфейс YouTube не отвечает: системный DNS или стратегия режут сам сайт — \
+                видео не начнётся и без этого"
+            .to_owned();
+    }
+    match stream.status {
+        YoutubeStreamStatus::DpiStall => {
+            "Обнаружен 16-КБ затык ТСПУ: стратегия пропускает сайт, но блокирует видеопоток. \
+             Рекомендуется стратегия с fake quic или multisplit"
+                .to_owned()
+        }
+        YoutubeStreamStatus::UrlUnavailable => {
+            "Сайт отвечает, но плеер API не выдал адрес видео: интерфейс работает, проверьте \
+             видеопоток вручную — доступ к googlevideo.com может быть отрезан"
+                .to_owned()
+        }
+        YoutubeStreamStatus::Timeout | YoutubeStreamStatus::Blocked => {
+            "Интерфейс отвечает, но чанк видеопотока не доставлен: googlevideo.com блокируется \
+             отдельной веткой ТСПУ. Решение: стратегия с fake quic для QUIC/HTTP3 или правило \
+             маршрутизации на *.googlevideo.com"
+                .to_owned()
+        }
+        _ => format!("Проверка видеопотока не прошла: {}", stream.detail),
+    }
+}
+
+fn games_report() -> (Vec<ServiceComponent>, String) {
+    let (store, api, ping) = thread::scope(|s| {
+        let store = s.spawn(|| curl::check("https://store.steampowered.com", CheckKind::Tls13, None));
+        let api = s.spawn(|| curl::check("https://api.steampowered.com", CheckKind::Tls13, None));
+        let ping = s.spawn(|| probe::ping::ping("api.steampowered.com", 1000));
+        (
+            store.join().unwrap_or_else(|_| plain(CheckKind::Tls13)),
+            api.join().unwrap_or_else(|_| plain(CheckKind::Tls13)),
+            ping.join().unwrap_or(None),
+        )
+    });
+    let store_ok = store.status == CheckStatus::Ok;
+    let api_ok = api.status == CheckStatus::Ok;
+    let components = vec![
+        ServiceComponent {
+            name: "Steam Store (HTTPS)".to_owned(),
+            ok: store_ok,
+            detail: format!("HTTP {} за {} мс", store.http_code, store.time_ms.unwrap_or_default()),
+        },
+        ServiceComponent {
+            name: "Steam Web API (HTTPS)".to_owned(),
+            ok: api_ok,
+            detail: format!("HTTP {} за {} мс", api.http_code, api.time_ms.unwrap_or_default()),
+        },
+        ServiceComponent {
+            name: "ICMP до игрового API".to_owned(),
+            ok: ping.is_some(),
+            detail: match ping {
+                Some(ms) => format!("{ms} мс"),
+                None => "ответа нет".to_owned(),
+            },
+        },
+    ];
+    let verdict = if store_ok && api_ok {
+        "Игровые сервисы Steam доступны: магазины и API отвечают. Игровой UDP-трафик идёт мимо \
+         очереди через исключения портов — проверьте их, если в игре высокий пинг"
+            .to_owned()
+    } else {
+        "Сервисы Steam не отвечают: добавьте store.steampowered.com и api.steampowered.com в \
+         правило маршрутизации или смените стратегию"
+            .to_owned()
+    };
+    (components, verdict)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn target_forms_end_in_a_host_and_a_url() {
@@ -1627,7 +1955,8 @@ mod tests {
     }
 
     #[test]
-    fn donors_come_from_the_table_then_the_stem() {        assert_eq!(donor_candidates("stun2.bin"), ["stun.bin"]);
+    fn donors_come_from_the_table_then_the_stem() {
+        assert_eq!(donor_candidates("stun2.bin"), ["stun.bin"]);
         assert_eq!(
             donor_candidates("quic_initial_4pda_to.bin"),
             ["quic_initial_www_google_com.bin"]
@@ -1639,5 +1968,76 @@ mod tests {
         // No table entry: the same name without its trailing number is tried.
         assert_eq!(donor_candidates("some2.bin"), ["some.bin"]);
         assert!(donor_candidates("unique.bin").is_empty());
+    }
+
+    #[test]
+    fn the_discord_verdict_names_the_broken_component_and_its_remedy() {
+        use probe::discord_voice::{VoiceCheckResult, VoiceStatus};
+        let voice = |status: VoiceStatus| VoiceCheckResult {
+            status,
+            endpoint: "rotterdam.discord.media".to_owned(),
+            port: 50001,
+            time_ms: Some(31),
+            external_ip: Some("203.0.113.9".to_owned()),
+            external_port: Some(50001),
+            detail: "probe".to_owned(),
+        };
+        // Everything green: one line of confirmation.
+        let all_ok = discord_verdict(true, true, true, &voice(VoiceStatus::Ok));
+        assert!(all_ok.contains("полностью исправен"), "{all_ok}");
+        // Chat passes, voice times out: the ТСПУ advice with the strategy switch.
+        let no_voice = discord_verdict(true, true, false, &voice(VoiceStatus::Timeout));
+        assert!(no_voice.contains("WebRTC заблокированы"), "{no_voice}");
+        assert!(no_voice.contains("ALT11/ALT12"), "{no_voice}");
+        // HTTPS itself is gone: nothing else matters.
+        let no_https = discord_verdict(false, false, false, &voice(VoiceStatus::Timeout));
+        assert!(no_https.contains("Текстовый API"), "{no_https}");
+        // The gateway reset is its own verdict.
+        let ws_down = discord_verdict(true, false, true, &voice(VoiceStatus::Ok));
+        assert!(ws_down.contains("WebSocket"), "{ws_down}");
+    }
+
+    #[test]
+    fn the_youtube_verdict_names_the_16kb_stall() {
+        use probe::discord_voice::{YoutubeStreamResult, YoutubeStreamStatus};
+        let stream = |status: YoutubeStreamStatus, bytes: u32, kbps: Option<u32>| YoutubeStreamResult {
+            status,
+            http_code: "206".to_owned(),
+            downloaded_bytes: bytes,
+            speed_kbps: kbps,
+            time_ms: Some(900),
+            host: Some("rr5---sn-9pm.googlevideo.com".to_owned()),
+            detail: "probe".to_owned(),
+        };
+        // Site and chunk pass.
+        let ok = youtube_verdict(true, &stream(YoutubeStreamStatus::Ok, 131_072, Some(900)));
+        assert!(ok.contains("полностью исправен"), "{ok}");
+        // The handshake passes, the chunk freezes at 16 KiB: the stall advice.
+        let stall = youtube_verdict(true, &stream(YoutubeStreamStatus::DpiStall, 16_384, None));
+        assert!(stall.contains("16-КБ затык"), "{stall}");
+        assert!(stall.contains("fake quic"), "{stall}");
+        // The site itself is unreachable.
+        let no_site = youtube_verdict(false, &stream(YoutubeStreamStatus::Timeout, 0, None));
+        assert!(no_site.contains("Интерфейс YouTube"), "{no_site}");
+    }
+
+    #[test]
+    fn the_diagnostic_target_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_value(DiagnosticTarget::Discord).unwrap(),
+            json!("discord")
+        );
+        assert_eq!(
+            serde_json::to_value(DiagnosticTarget::YouTube).unwrap(),
+            json!("youtube")
+        );
+        assert_eq!(
+            serde_json::to_value(DiagnosticTarget::Games).unwrap(),
+            json!("games")
+        );
+        assert_eq!(
+            serde_json::from_value::<DiagnosticTarget>(json!("youtube")).unwrap(),
+            DiagnosticTarget::YouTube
+        );
     }
 }

@@ -122,6 +122,9 @@ enum Command {
     /// A domain (`discord.com`) or URL (`https://gateway.discord.gg`): DNS, the lists it is in,
     /// the rule that takes it and its live checks.
     Probe { target: String },
+    /// The deep diagnosis of one service's real traffic: Discord voice UDP and its gateway
+    /// WebSocket, a YouTube video chunk, the game servers — with an expert verdict.
+    ProbeService { service: ServiceArg },
 }
 
 #[derive(Debug, Subcommand)]
@@ -339,6 +342,25 @@ enum FixTarget {
     KillConflicts,
     EnableTcpTimestamps,
     LoadKernelModules,
+}
+
+/// The service `probe-service` names: the names the app's `DiagnosticTarget` serde carries.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "lowercase")]
+enum ServiceArg {
+    Discord,
+    YouTube,
+    Games,
+}
+
+impl ServiceArg {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Discord => "discord",
+            Self::YouTube => "youtube",
+            Self::Games => "games",
+        }
+    }
 }
 
 /// The JSON the app's `FixAction` reads: the same names its serde tags carry.
@@ -709,6 +731,15 @@ fn run(args: Cli, call: Call, note: Note) -> Result<Done, Fail> {
             let data = call(Request::ProbeTarget { target })?;
             if let Some(count) = data["intercepted_packets"].as_u64() {
                 note(&format!("Перехвачено nfqws2: {count} пак."));
+            }
+            return Ok(Done::Json(data));
+        }
+        Command::ProbeService { service } => {
+            let data = call(Request::ProbeService {
+                service: service.name().to_owned(),
+            })?;
+            if let Some(verdict) = data["verdict"].as_str() {
+                note(&format!("Экспертный вердикт: {verdict}"));
             }
             return Ok(Done::Json(data));
         }
@@ -1384,6 +1415,24 @@ mod tests {
                     target: "https://discord.com".into(),
                 },
             ),
+            (
+                &["probe-service", "discord"],
+                Request::ProbeService {
+                    service: "discord".into(),
+                },
+            ),
+            (
+                &["probe-service", "youtube"],
+                Request::ProbeService {
+                    service: "youtube".into(),
+                },
+            ),
+            (
+                &["probe-service", "games"],
+                Request::ProbeService {
+                    service: "games".into(),
+                },
+            ),
             (&["exclusions", "show"], Request::GetExclusionRules),
             (&["tg-ws", "status"], Request::TgWsStatus),
             (&["tg-ws", "install"], Request::InstallTgWs),
@@ -1946,6 +1995,30 @@ fn default_rule_of<'a>(rules: &'a Value) -> &'a Value {
                 Request::TestsStatus
             ]
         );
+    }
+
+    #[test]
+    fn probe_service_names_the_verdict_and_mirrors_the_json() {
+        let report = json!({
+            "service": "discord",
+            "components": [{ "name": "Текстовый API (HTTPS)", "ok": true, "detail": "HTTP 200" }],
+            "verdict": "Discord полностью исправен: чат, шлюз и голосовые каналы доступны",
+            "total_ms": 512,
+        });
+        let (outcome, asked, notes) = drive_noted(
+            &["probe-service", "discord"],
+            vec![Ok(report.clone())],
+        );
+        assert_eq!(asked, [Request::ProbeService { service: "discord".into() }]);
+        assert_eq!(outcome, Ok(Done::Json(report)));
+        assert_eq!(
+            notes,
+            ["Экспертный вердикт: Discord полностью исправен: чат, шлюз и голосовые каналы доступны"]
+        );
+        // No verdict in the answer: no note, the JSON passes through.
+        let (outcome, _, notes) = drive_noted(&["probe-service", "games"], vec![Ok(json!({}))]);
+        assert_eq!(outcome, Ok(Done::Json(json!({}))));
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     #[test]
