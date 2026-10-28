@@ -109,14 +109,34 @@ const FLOWSEAL: [(&str, &str); 22] = [
     ),
 ];
 
-const DEFAULT_LISTS: [&str; 8] = [
-    "list-general.txt",
-    "list-google.txt",
+/// The lists a strategy cannot work without. `zapret2` itself ships none, so the canonical
+/// lists of Flowseal's release (the strategies above are its `.bat`s) are built into the app:
+/// a missing file, and even more an empty one, leaves every fake without its hostlist and the
+/// tests answer with errors instead of domains.
+const EMBEDDED_LISTS: [(&str, &str); 4] = [
+    (
+        "list-general.txt",
+        include_str!("builtin/lists/list-general.txt"),
+    ),
+    (
+        "list-google.txt",
+        include_str!("builtin/lists/list-google.txt"),
+    ),
+    (
+        "list-exclude.txt",
+        include_str!("builtin/lists/list-exclude.txt"),
+    ),
+    (
+        "ipset-exclude.txt",
+        include_str!("builtin/lists/ipset-exclude.txt"),
+    ),
+];
+
+/// The user's own additions: an empty file is their correct stub.
+const USER_LISTS: [&str; 4] = [
     "list-general-user.txt",
-    "list-exclude.txt",
     "list-exclude-user.txt",
     "ipset-all.txt",
-    "ipset-exclude.txt",
     "ipset-exclude-user.txt",
 ];
 
@@ -131,6 +151,38 @@ const DEFAULT_BINS: [&str; 10] = [
     "tls_clienthello_max_ru.bin",
     "tls_clienthello_sochi_park.bin",
     "tls_clienthello_www_google_com.bin",
+];
+
+/// What fills each default `.bin` the release does not ship itself: the fake packet of a close
+/// relative, read from the release's `files/fake/` (or from the bin folder, where a previous
+/// repair may already have put a copy). An empty blob would make DPI answer with an empty
+/// packet, so an empty stub is never written while any fake is left to copy.
+const BIN_DONORS: [(&str, &[&str]); 7] = [
+    (
+        "ACTIVE_DISCORD_UDP.bin",
+        &["quic_initial_www_google_com.bin", "stun.bin"],
+    ),
+    (
+        "ACTIVE_GAME_UDP.bin",
+        &["quic_initial_www_google_com.bin", "stun.bin"],
+    ),
+    (
+        "quic_initial_4pda_to.bin",
+        &["quic_initial_www_google_com.bin"],
+    ),
+    ("stun2.bin", &["stun.bin"]),
+    (
+        "tls_clienthello_4pda_to.bin",
+        &["tls_clienthello_www_google_com.bin"],
+    ),
+    (
+        "tls_clienthello_max_ru.bin",
+        &["tls_clienthello_www_google_com.bin"],
+    ),
+    (
+        "tls_clienthello_sochi_park.bin",
+        &["tls_clienthello_www_google_com.bin"],
+    ),
 ];
 
 pub fn lists_dir(engine: &Engine) -> PathBuf {
@@ -153,10 +205,35 @@ pub fn bin_dir(engine: &Engine) -> PathBuf {
     engine.root().join("bin")
 }
 
-pub fn ensure_stubs(engine: &Engine) {
-    let lists = lists_dir(engine);
-    if let Ok(()) = std::fs::create_dir_all(&lists) {
-        for file in DEFAULT_LISTS {
+/// What a stub restore brought back: the lists and the `.bin`s it wrote.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Restored {
+    pub lists: Vec<String>,
+    pub bins: Vec<String>,
+}
+
+/// Creates the lists and `.bin`s a strategy refers to, filling every missing **or empty** file
+/// from what is built in or what the release ships. `extra_bins` are names a strategy names
+/// beyond the defaults; returns what was (re)written.
+pub fn restore_stubs(engine: &Engine, extra_bins: &[&str]) -> Restored {
+    restore_into(
+        &lists_dir(engine),
+        &bin_dir(engine),
+        &engine.root().join("files").join("fake"),
+        extra_bins,
+    )
+}
+
+fn restore_into(lists: &Path, bin: &Path, fake: &Path, extra_bins: &[&str]) -> Restored {
+    let mut restored = Restored::default();
+    if let Ok(()) = std::fs::create_dir_all(lists) {
+        for (file, embedded) in EMBEDDED_LISTS {
+            let path = lists.join(file);
+            if empty(&path) && std::fs::write(&path, embedded).is_ok() {
+                restored.lists.push(file.to_owned());
+            }
+        }
+        for file in USER_LISTS {
             let path = lists.join(file);
             if !path.exists() {
                 let _ = std::fs::write(&path, b"");
@@ -164,21 +241,84 @@ pub fn ensure_stubs(engine: &Engine) {
         }
     }
 
-    let bin = bin_dir(engine);
-    let fake_dir = engine.root().join("files").join("fake");
-    if let Ok(()) = std::fs::create_dir_all(&bin) {
-        for file in DEFAULT_BINS {
+    if let Ok(()) = std::fs::create_dir_all(bin) {
+        for file in DEFAULT_BINS.iter().copied().chain(extra_bins.iter().copied()) {
             let path = bin.join(file);
-            if !path.exists() {
-                let fake = fake_dir.join(file);
-                if fake.is_file() {
-                    let _ = std::fs::copy(&fake, &path);
-                } else {
+            if !empty(&path) {
+                continue;
+            }
+            match blob_source(bin, fake, file) {
+                Some(source) => {
+                    if std::fs::copy(&source, &path).is_ok() {
+                        log::info!("{} ← {}", path.display(), source.display());
+                        restored.bins.push(file.to_owned());
+                    }
+                }
+                None => {
+                    // Nothing left to copy: an empty stub at least keeps the file the strategy
+                    // names in place, and the diagnostics report it.
                     let _ = std::fs::write(&path, b"");
+                    log::warn!("{} stays empty: no fake packet to copy", path.display());
                 }
             }
         }
     }
+    restored
+}
+
+/// The old name of a missing-or-empty fill: everything `restore_stubs` did, report ignored.
+pub fn ensure_stubs(engine: &Engine) {
+    let _ = restore_stubs(engine, &[]);
+}
+
+/// Whether the file is absent or holds no bytes.
+fn empty(path: &Path) -> bool {
+    !path.is_file() || std::fs::metadata(path).is_ok_and(|meta| meta.len() == 0)
+}
+
+/// Where a missing or empty `.bin` gets its bytes from, in the order of preference: the file of
+/// the same name, then its donors — each first in the bin folder, then in the release's
+/// `files/fake/` — then any non-empty fake of the same kind of packets.
+fn blob_source(bin: &Path, fake: &Path, name: &str) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for dir in [bin, fake] {
+        candidates.push(dir.join(name));
+        if let Some((_, donors)) = BIN_DONORS.iter().find(|(target, _)| *target == name) {
+            candidates.extend(donors.iter().map(|donor| dir.join(donor)));
+        }
+    }
+    // The class of packets decides what still fits: a QUIC initial stands in for a QUIC
+    // initial, a TLS hello for a TLS hello, a STUN for a STUN.
+    let class = |name: &str| -> &str {
+        if name.starts_with("quic_initial") {
+            "quic_initial"
+        } else if name.starts_with("tls_clienthello") {
+            "tls_clienthello"
+        } else if name.starts_with("stun") {
+            "stun"
+        } else if name.starts_with("ACTIVE") {
+            "quic_initial"
+        } else {
+            ""
+        }
+    };
+    if let Ok(entries) = std::fs::read_dir(fake) {
+        let wanted = class(name);
+        let mut same: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().is_some_and(|file| {
+                    class(&file.to_string_lossy()) == wanted && !wanted.is_empty()
+                })
+            })
+            .collect();
+        same.sort();
+        candidates.extend(same);
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.is_file() && std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -554,6 +694,82 @@ pub fn split(args: &str) -> (String, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The release skeleton a test's fake engine carries: only `files/fake/` ships blobs.
+    fn skeleton(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let fake = dir.join("zapret2/files/fake");
+        std::fs::create_dir_all(&fake).unwrap();
+        let (lists, bin) = (dir.join("lists"), dir.join("bin"));
+        std::fs::create_dir_all(&lists).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        (lists, bin, fake)
+    }
+
+    #[test]
+    fn an_empty_list_gets_the_built_in_text_and_a_user_list_stays_the_user_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let (lists, bin, fake) = skeleton(dir.path());
+        // The empty default and the absent one are the two ways a new folder starts.
+        std::fs::write(lists.join("list-general.txt"), b"").unwrap();
+        // A user list with content never gets touched.
+        std::fs::write(lists.join("list-exclude-user.txt"), "my.host\n").unwrap();
+
+        let restored = restore_into(&lists, &bin, &fake, &[]);
+
+        // Every empty default is filled, and nothing else is.
+        assert_eq!(
+            restored.lists,
+            ["list-general.txt", "list-google.txt", "list-exclude.txt", "ipset-exclude.txt"]
+        );
+        let general = std::fs::read_to_string(lists.join("list-general.txt")).unwrap();
+        assert!(general.lines().count() > 50, "{general}");
+        assert!(std::fs::read(lists.join("list-google.txt")).is_ok_and(|b| !b.is_empty()));
+        assert_eq!(
+            std::fs::read_to_string(lists.join("list-exclude-user.txt")).unwrap(),
+            "my.host\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_bin_takes_the_release_fake_then_its_donor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (lists, bin, fake) = skeleton(dir.path());
+        // The release ships only some of the fakes: the rest come from the donors.
+        std::fs::write(fake.join("quic_initial_www_google_com.bin"), b"quic").unwrap();
+        std::fs::write(fake.join("stun.bin"), b"stun").unwrap();
+        std::fs::write(fake.join("tls_clienthello_www_google_com.bin"), b"tls").unwrap();
+
+        let restored = restore_into(&lists, &bin, &fake, &[]);
+
+        assert!(restored.bins.contains(&"ACTIVE_DISCORD_UDP.bin".to_owned()));
+        assert!(restored.bins.contains(&"stun2.bin".to_owned()));
+        assert!(restored.bins.contains(&"tls_clienthello_sochi_park.bin".to_owned()));
+        // Not a byte of the bin folder is empty now: every default blob was filled.
+        for entry in std::fs::read_dir(&bin).unwrap().flatten() {
+            assert!(
+                std::fs::metadata(entry.path()).unwrap().len() > 0,
+                "{} is empty",
+                entry.path().display()
+            );
+        }
+        // A second run changes nothing: filled files stay as they are.
+        assert_eq!(restore_into(&lists, &bin, &fake, &[]), Restored::default());
+    }
+
+    #[test]
+    fn a_strategy_bin_beyond_the_defaults_is_restored_from_its_class() {
+        let dir = tempfile::tempdir().unwrap();
+        let (lists, bin, fake) = skeleton(dir.path());
+        std::fs::write(fake.join("quic_initial_rutracker_org.bin"), b"quic2").unwrap();
+
+        let restored = restore_into(&lists, &bin, &fake, &["ACTIVE_MY_UDP.bin"]);
+
+        assert!(restored.bins.contains(&"ACTIVE_MY_UDP.bin".to_owned()));
+        assert_eq!(
+            std::fs::read(bin.join("ACTIVE_MY_UDP.bin")).unwrap(),
+            b"quic2"
+        );
+    }
 
     #[test]
     fn lua_sources_are_cached_until_a_file_changes() {

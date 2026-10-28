@@ -40,13 +40,6 @@ const RESOLV_CONF: &str = "/etc/resolv.conf";
 const RESOLVED_CONFIG: &str =
     "[Resolve]\nDNS=77.88.8.8 77.88.8.1 8.8.8.8 1.1.1.1\nDomains=~.\nDNSOverTLS=no\n";
 
-/// A `.bin` of the bin folder that holds nothing and its non-empty donor of the same content.
-const BIN_DONORS: &[(&str, &[&str])] = &[
-    ("stun2.bin", &["stun.bin"]),
-    ("quic_initial_4pda_to.bin", &["quic_initial_www_google_com.bin"]),
-    ("tls_clienthello_sochi_park.bin", &["tls_clienthello_max_ru.bin"]),
-];
-
 /// The engine: where it is, what it says, and whether the system lets it take packets.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 pub struct EngineDiag {
@@ -171,7 +164,8 @@ pub enum FixAction {
     /// An unfinished operation (`pending.json`) or a set strategy without its service back:
     /// the snapshot is restored or the strategy applied again.
     RestoreService,
-    /// Empty or missing `.bin` files of the bin folder: a non-empty donor is copied over them.
+    /// Empty lists of the built-in set and empty or missing `.bin` files: the built-in text and
+    /// a non-empty fake or donor are written over them.
     RepairBins,
     /// Outside engine processes and foreign `zapret*` nftables: they take the queue's packets.
     KillConflicts,
@@ -325,9 +319,9 @@ pub fn doctor(app: &AppHandle) -> DoctorReport {
     if tcp_timestamps == Some(false) {
         issue(
             &mut issues,
-            "net.ipv4.tcp_timestamps is 0: the strategies with tcp_ts send extra timestamps \
-             first and DPI drops them — `fix` turns the sysctl on and keeps it in \
-             /etc/sysctl.d/99-zapret-timestamps.conf"
+            "net.ipv4.tcp_timestamps = 0: стратегии с tcp_ts сначала отправляют лишние \
+             timestamps, и DPI их отбрасывает — «Исправить» включит sysctl и сохранит значение \
+             в /etc/sysctl.d/99-zapret-timestamps.conf"
                 .to_owned(),
             Some(FixAction::EnableTcpTimestamps),
         );
@@ -336,8 +330,8 @@ pub fn doctor(app: &AppHandle) -> DoctorReport {
     if !kernel_nfqueue {
         issue(
             &mut issues,
-            "the nfnetlink_queue kernel module is not loaded: the queue gets no packets and \
-             nfqws2 idles — `fix` runs modprobe nfnetlink_queue and modprobe nft_queue"
+            "модуль ядра nfnetlink_queue не загружен: очередь не получает пакеты и nfqws2 \
+             простаивает — «Исправить» выполнит modprobe nfnetlink_queue и modprobe nft_queue"
                 .to_owned(),
             Some(FixAction::LoadKernelModules),
         );
@@ -384,10 +378,10 @@ fn system_dns(issues: &mut Vec<Issue>) -> SystemDnsDiag {
         issue(
             issues,
             format!(
-                "the system DNS resolver does not answer while a direct UDP query of a public \
-                 resolver does: `fix` puts plain public resolvers back (a systemd-resolved \
-                 drop-in, a NetworkManager conf, or {RESOLV_CONF} itself, whatever this system \
-                 uses) and flushes the caches"
+                "системный DNS-резолвер не отвечает, хотя прямой UDP-запрос к публичному \
+                 резолверу проходит: «Исправить» вернёт простые публичные резолверы (drop-in \
+                 для systemd-resolved, конфиг NetworkManager или сам {RESOLV_CONF} — что в этой \
+                 системе используется) и сбросит кэши"
             ),
             Some(FixAction::FixSystemDns),
         );
@@ -481,23 +475,34 @@ fn dns_query(id: impl Into<u16>, name: &str) -> Vec<u8> {
     out
 }
 
+/// The state in the words the overview uses (spec 9): the report is read by a human.
+fn svc_text(state: SvcState) -> &'static str {
+    match state {
+        SvcState::NotInstalled => "не установлена",
+        SvcState::Stopped => "остановлена",
+        SvcState::StartPending => "запускается",
+        SvcState::StopPending => "останавливается",
+        SvcState::Running => "работает",
+        SvcState::Other => "в непонятном состоянии",
+    }
+}
+
 /// The `zapret2` service as the overview shows it, with its strategy and the game filter in force.
-fn service_diag(settings: &Settings, issues: &mut Vec<Issue>) -> ServiceDiag {
-    let (name, _) = service::active();
+fn service_diag(settings: &Settings, issues: &mut Vec<Issue>) -> ServiceDiag {    let (name, _) = service::active();
     let state = service::state(name);
     if state != SvcState::Running {
         // A strategy recorded but no service is what an interrupted test or apply leaves:
         // `RestoreService` applies it again; nothing set means only advice can repair it.
         let fix = service::strategy().map(|_| FixAction::RestoreService);
         let remedy = match fix {
-            Some(_) => ": `fix` applies it again".to_owned(),
-            None => format!(
-                ": apply a strategy (`zapret-hub-cli apply <name>` or `zapret-hub-cli apply-best`)"
-            ),
+            Some(_) => ": кнопка «Исправить» применит её заново".to_owned(),
+            None => ": примените стратегию (`zapret-hub-cli apply <имя>` или \
+                     `zapret-hub-cli apply-best`)"
+                .to_owned(),
         };
         issue(
             issues,
-            format!("the {name} service is {state:?}{remedy}"),
+            format!("служба {name} {}{remedy}", svc_text(state)),
             fix,
         );
     }
@@ -518,7 +523,8 @@ fn restore_service(state: &AppState, issues: &mut Vec<Issue>) {
         Ok(Some(_)) => issue(
             issues,
             format!(
-                "{} holds an unfinished operation: its state was not put back — `fix` restores it",
+                "{} хранит незавершённую операцию: состояние не было возвращено — кнопка \
+                 «Исправить» восстановит его",
                 pending.display()
             ),
             Some(FixAction::RestoreService),
@@ -539,7 +545,7 @@ fn engine_diag(engine: anyhow::Result<Option<Engine>>, issues: &mut Vec<Issue>) 
         Ok(None) => {
             issue(
                 issues,
-                "the zapret2 folder is not set: choose it in Zapret Hub → Settings".to_owned(),
+                "папка zapret2 не выбрана: укажите её в Zapret Hub → Настройки".to_owned(),
                 None,
             );
             return empty_engine(None);
@@ -563,15 +569,16 @@ fn engine_diag(engine: anyhow::Result<Option<Engine>>, issues: &mut Vec<Issue>) 
         if !executable {
             issue(
                 issues,
-                format!("{path} cannot be executed: `sudo chmod +x {path}`"),
+                format!("{path} нельзя выполнить: `sudo chmod +x {path}`"),
                 None,
             );
         } else if !(cap_net_admin && cap_net_raw) {
             issue(
                 issues,
                 format!(
-                    "{path} misses capabilities (cap_net_admin {cap_net_admin}, cap_net_raw \
-                     {cap_net_raw}): `sudo setcap 'cap_net_admin,cap_net_raw=eip' {path}`"
+                    "{path} не имеет network-capabilities (cap_net_admin {cap_net_admin}, \
+                     cap_net_raw {cap_net_raw}) и не сможет подключиться к очереди: \
+                     `sudo setcap 'cap_net_admin,cap_net_raw=eip' {path}`"
                 ),
                 None,
             );
@@ -673,7 +680,8 @@ fn referenced_bins(text: &str) -> Vec<String> {
 }
 
 /// The three counts and every `.bin` with its used-by mark; a `.bin` the active strategy sends
-/// empty or misses, and a missing list, are problems the DPI check only hints at.
+/// empty or misses, an empty default list, and a missing list, are problems the DPI check only
+/// hints at.
 fn lists_and_bins(
     engine: &Option<Engine>,
     service: &ServiceDiag,
@@ -693,10 +701,29 @@ fn lists_and_bins(
             issue(
                 issues,
                 format!(
-                    "{} is missing: the strategy would read nothing from it",
+                    "{} отсутствует: стратегия не прочитает из него ничего",
                     lists.join(file).display()
                 ),
                 None,
+            );
+        }
+    }
+    // An empty default list is how a new engine folder starts: the fake packets then carry no
+    // hostlist at all, and the tests answer with errors instead of domains.
+    for (file, what) in [
+        ("list-general.txt", "Discord и остальные сайты"),
+        ("list-google.txt", "YouTube"),
+    ] {
+        if count(file) == Some(0) {
+            issue(
+                issues,
+                format!(
+                    "{} пуст (0 доменов): подмена не сработает ни для одного сайта из {} — \
+                     кнопка «Исправить» восстановит встроенный список",
+                    lists.join(file).display(),
+                    what
+                ),
+                Some(FixAction::RepairBins),
             );
         }
     }
@@ -720,12 +747,13 @@ fn lists_and_bins(
             let used_by_active = referenced.iter().any(|used| used == &name);
             if bytes == 0 {
                 let for_active = used_by_active
-                    .then(|| " and the active strategy sends it as a fake or a blob: DPI would \
-                               answer with an empty packet".to_owned())
-                    .unwrap_or_else(|| " and its donor can fill it in".to_owned());
+                    .then(|| " — активная стратегия отправляет его как fake или blob: DPI \
+                               ответит пустым пакетом"
+                        .to_owned())
+                    .unwrap_or_else(|| " — донор заполнит его".to_owned());
                 issue(
                     issues,
-                    format!("{} of the bin folder is empty{for_active}", bin.join(&name).display()),
+                    format!("{} пуст{for_active}", bin.join(&name).display()),
                     Some(FixAction::RepairBins),
                 );
             }
@@ -742,7 +770,7 @@ fn lists_and_bins(
             issue(
                 issues,
                 format!(
-                    "the active strategy loads {} of the bin folder, which is missing",
+                    "активная стратегия загружает {}, но его нет в папке bin",
                     strategies::bin_dir(engine).join(used).display()
                 ),
                 Some(FixAction::RepairBins),
@@ -765,15 +793,15 @@ fn nfqueue(service: &ServiceDiag, issues: &mut Vec<Issue>) -> NfQueueDiag {
             None => issue(
                 issues,
                 format!(
-                    "queue {QNUM} is not in the kernel's queue list: the nft table did not apply \
-                     it or the strategy named another --qnum"
+                    "очереди {QNUM} нет в списке очередей ядра: nft-таблица её не применила, \
+                     или стратегия указала другой --qnum"
                 ),
                 None,
             ),
             Some((0, _)) => issue(
                 issues,
-                "the service runs but nobody holds its queue: nfqws2 did not bind it — see the \
-                 journal (`zapret-hub-cli service logs`)"
+                "служба работает, но её очередь никто не держит: nfqws2 не привязался к ней — \
+                 смотрите журнал (`zapret-hub-cli service logs`)"
                     .to_owned(),
                 None,
             ),
@@ -834,16 +862,16 @@ fn nftables(service: &ServiceDiag, issues: &mut Vec<Issue>) -> NftDiag {
                 .then_some(FixAction::RestoreService);
             issue(
                 issues,
-                "the nft table inet zapret_hub is not applied: nfqws2 gets no packets — restart \
-                 the service, its ExecStartPre applies the table"
+                "nft-таблица inet zapret_hub не применена: nfqws2 не получает пакеты — \
+                 перезапустите службу, её ExecStartPre применяет таблицу"
                     .to_owned(),
                 fix,
             );
         } else if !lo_skip || !fwmark {
             issue(
                 issues,
-                "the nft table misses the `oifname \"lo\" or the nfqws2-mark rule: apply the \
-                 strategy again, the unit's table file holds both"
+                "в nft-таблице нет правила `oifname \"lo\"` или метки nfqws2: примените \
+                 стратегию заново — файл таблицы юнита содержит оба правила"
                     .to_owned(),
                 service.strategy
                     .is_some()
@@ -903,9 +931,9 @@ fn conflicts(service: &ServiceDiag, issues: &mut Vec<Issue>) -> Conflicts {
             issue(
                 issues,
                 format!(
-                    "an outside {image} process runs, pid {}: it takes packets from the queue \
-                     too — `kill-conflicts` ends it or its service does",
-                    proc.pid
+                    "запущен посторонний процесс {image} (pid {pid}): он тоже забирает пакеты \
+                     очереди — «kill-conflicts» завершит его, как и его собственная служба",
+                    pid = proc.pid
                 ),
                 Some(FixAction::KillConflicts),
             );
@@ -929,8 +957,8 @@ fn conflicts(service: &ServiceDiag, issues: &mut Vec<Issue>) -> Conflicts {
         issue(
             issues,
             format!(
-                "the foreign nftables table {table} filters traffic together with Zapret Hub: \
-                 `kill-conflicts` deletes it"
+                "чужая таблица nftables {table} фильтрует трафик вместе с Zapret Hub: \
+                 «kill-conflicts» удалит её"
             ),
             Some(FixAction::KillConflicts),
         );
@@ -953,8 +981,8 @@ fn proxies(app: &AppHandle, settings: &Settings, issues: &mut Vec<Issue>) -> Pro
                 issue(
                     issues,
                     format!(
-                        "the SOCKS5 proxy {addr} does not answer within {} ms: check that it \
-                         runs and the address holds, or clear it in Settings",
+                        "прокси SOCKS5 {addr} не отвечает уже {} мс: проверьте, что он запущен, \
+                         и что адрес верен, или очистите его в Настройках",
                         SOCKS_BUDGET.as_millis()
                     ),
                     None,
@@ -984,8 +1012,8 @@ fn proxies(app: &AppHandle, settings: &Settings, issues: &mut Vec<Issue>) -> Pro
         issue(
             issues,
             format!(
-                "tg-ws-proxy runs but nothing listens on port {}: restart it (`zapret-hub-cli \
-                 tg-ws on`)",
+                "tg-ws-proxy запущен, но порт {} ничего не слушает — перезапустите его \
+                 (`zapret-hub-cli tg-ws on`)",
                 tg.port
             ),
             None,
@@ -1071,7 +1099,7 @@ fn deps_diag(issues: &mut Vec<Issue>) -> (String, DepsDiag) {
         issue(
             issues,
             format!(
-                "the tools are missing: {} — the {name} way is `{command}`",
+                "отсутствуют утилиты: {} — в {name} они ставятся командой `{command}`",
                 missing.join(", ")
             ),
             None,
@@ -1213,85 +1241,28 @@ fn fix_restore_service(app: &AppHandle) -> anyhow::Result<()> {
     anyhow::bail!("there is nothing to restore: no unfinished operation and no strategy applied");
 }
 
-/// Donor `.bin` names to copy from, table first, then the same stem without its trailing number
-/// (`stun2.bin` → `stun.bin`).
-fn donor_candidates(name: &str) -> Vec<String> {
-    let mut donors: Vec<String> = BIN_DONORS
-        .iter()
-        .find(|(target, _)| *target == name)
-        .map(|(_, donors)| donors.iter().map(|donor| donor.to_string()).collect())
-        .unwrap_or_default();
-    let Some(stem) = name.strip_suffix(".bin") else {
-        return donors;
-    };
-    let cut = stem.trim_end_matches(|c: char| c.is_ascii_digit());
-    let without = cut.trim_end_matches(['_', '-']);
-    let fallback = format!("{without}.bin");
-    if !without.is_empty() && without.len() != stem.len() && !donors.contains(&fallback) {
-        donors.push(fallback);
-    }
-    donors
-}
-
-/// The `.bin` files to repair: every empty one of the bin folder, and names the active strategy
-/// loads that it holds nothing under.
-fn repairable(engine: &Engine, service_strategy: Option<&str>) -> Vec<String> {
-    let bin = strategies::bin_dir(engine);
-    let mut broken: Vec<String> = match std::fs::read_dir(&bin) {
-        Ok(entries) => entries
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| {
-                name.ends_with(".bin")
-                    && std::fs::metadata(bin.join(name)).is_ok_and(|meta| meta.len() == 0)
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    broken.sort();
-    let referenced = active_text(engine, service_strategy)
-        .map(|active| referenced_bins(&active.text))
-        .unwrap_or_default();
-    for used in referenced {
-        if !std::fs::metadata(bin.join(&used)).is_ok_and(|meta| meta.len() > 0)
-            && !broken.contains(&used)
-        {
-            broken.push(used);
-        }
-    }
-    broken
-}
-
-/// Empty and missing `.bin` files are copied over from their non-empty donors.
+/// The empty and the missing come back: the built-in lists, the `.bin` files from the release's
+/// own fakes and their donors — plus any `.bin` the active strategy names.
 fn fix_repair_bins(app: &AppHandle) -> anyhow::Result<()> {
     let state = actions::state(app);
     let engine = state.engine2_required()?;
-    let bin = strategies::bin_dir(&engine);
-    let broken = repairable(&engine, service::strategy().as_deref());
-    anyhow::ensure!(!broken.is_empty(), "no empty or missing `.bin` to repair");
-    let mut fixed = Vec::new();
-    for name in broken {
-        let donor = donor_candidates(&name)
-            .into_iter()
-            .find(|donor| {
-                std::fs::metadata(bin.join(donor)).is_ok_and(|meta| meta.len() > 0)
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{name}: no non-empty donor `.bin` in {} — reinstall the engine release",
-                    bin.display()
-                )
-            })?;
-        std::fs::copy(bin.join(&donor), bin.join(&name))?;
-        log::info!("{} ← {}", bin.join(&name).display(), donor);
-        fixed.push(name);
-    }
-    log::info!("{}.bin files repaired: {}", fixed.len(), fixed.join(", "));
+    let referenced = active_text(&engine, service::strategy().as_deref())
+        .map(|active| referenced_bins(&active.text))
+        .unwrap_or_default();
+    let referenced: Vec<&str> = referenced.iter().map(String::as_str).collect();
+    let restored = strategies::restore_stubs(&engine, &referenced);
+    anyhow::ensure!(
+        !restored.lists.is_empty() || !restored.bins.is_empty(),
+        "нечего восстанавливать: списки доменов и `.bin` не пусты"
+    );
+    log::info!(
+        "восстановлено: списки [{}], .bin [{}]",
+        restored.lists.join(", "),
+        restored.bins.join(", ")
+    );
     Ok(())
 }
 
-/// Outside engine processes end, foreign `zapret*` tables go; the service's own engine and this
-/// app stay.
 fn fix_kill_conflicts() -> anyhow::Result<()> {
     let (name, _) = service::active();
     let service_pid = service::status(name).map_or(0, |(_, pid)| pid);
@@ -1952,22 +1923,6 @@ mod tests {
         assert_eq!(package("getcap", "sudo zypper install"), "libcap-progs");
         assert_eq!(package("setcap", "sudo apt install"), "libcap");
         assert_eq!(package("curl", "sudo dnf install"), "curl");
-    }
-
-    #[test]
-    fn donors_come_from_the_table_then_the_stem() {
-        assert_eq!(donor_candidates("stun2.bin"), ["stun.bin"]);
-        assert_eq!(
-            donor_candidates("quic_initial_4pda_to.bin"),
-            ["quic_initial_www_google_com.bin"]
-        );
-        assert_eq!(
-            donor_candidates("tls_clienthello_sochi_park.bin"),
-            ["tls_clienthello_max_ru.bin"]
-        );
-        // No table entry: the same name without its trailing number is tried.
-        assert_eq!(donor_candidates("some2.bin"), ["some.bin"]);
-        assert!(donor_candidates("unique.bin").is_empty());
     }
 
     #[test]
