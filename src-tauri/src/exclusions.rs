@@ -1,8 +1,9 @@
 //! Named exclusion groups kept in `data/exclusions.toml`. A group's `apps` are matched against
-//! running processes and put into the `zapret_bypass` cgroup v2, so their sockets never reach
-//! nfqws2. The enabled groups' domains, IPs, apps and ports are also derived into the flat
-//! exclude lists of zapret2 and the settings' ports, so zapret2 and the nftables queue see the
-//! same exclusions.
+//! running processes and their open local ports go into the nftables bypass sets, so the
+//! sockets of the excluded programs never reach nfqws2 — never the processes themselves into a
+//! cgroup: a cgroup mark passes to every child the excluded process ever starts. The enabled
+//! groups' domains, IPs, apps and ports are also derived into the flat exclude lists of zapret2
+//! and the settings' ports, so zapret2 and the nftables queue see the same exclusions.
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
@@ -13,9 +14,8 @@ use specta::Type;
 /// `data/exclusions.toml` next to the exe: portable, like everything else (spec 4.3).
 pub const FILE_NAME: &str = "exclusions.toml";
 
-/// The groups created when there are no exclusions yet: these programs always go around zapret.
+/// The groups created when there are no exclusions yet.
 pub const DEFAULT_NAME_APPS: &str = "🛡️ Программы без zapret";
-pub const DEFAULT_APPS: &[&str] = &["opencode", "opencode-cli"];
 
 pub const DEFAULT_NAME_RU: &str = "🇷🇺 Российские сайты и сервисы";
 pub const DEFAULT_DOMAINS_RU: &[&str] = &[
@@ -201,11 +201,14 @@ pub(crate) fn default_rules() -> Vec<ExclusionRule> {
 fn default_rule_apps() -> ExclusionRule {
     ExclusionRule {
         name: DEFAULT_NAME_APPS.to_owned(),
-        enabled: true,
+        // Off with no apps: the user adds what they really need to bypass. An app excluded by
+        // default (the agent `opencode` once shipped here) carries the exclusion onto everything
+        // it starts — the app itself and its test checks included.
+        enabled: false,
         domains: Vec::new(),
         ips: Vec::new(),
         ports: Vec::new(),
-        apps: DEFAULT_APPS.iter().map(|app| app.to_string()).collect(),
+        apps: Vec::new(),
     }
 }
 
@@ -321,9 +324,7 @@ ports = ["443"]
         assert_eq!(loaded.rules, rules.rules);
         assert!(loaded.path.exists());
         let text = std::fs::read_to_string(&loaded.path).unwrap();
-        eprintln!("DEBUG roundtrip toml:\n{text}");
-        assert!(text.contains("\"opencode\""));
-        assert!(text.contains("\"opencode-cli\""));
+        assert!(text.contains("\"qbittorrent\""));
         assert!(text.contains("name = \"mine\""));
     }
 
@@ -369,7 +370,9 @@ ports = ["443"]
         };
         let group = rules.default_group();
         assert_eq!(group.name, DEFAULT_NAME_APPS);
-        assert_eq!(group.apps, DEFAULT_APPS);
+        // Off and empty by default: the user adds the apps they really need to bypass.
+        assert!(!group.enabled);
+        assert_eq!(group.apps, Vec::<String>::new());
         assert!(rules.rules.iter().any(|rule| rule.name == DEFAULT_NAME_APPS));
     }
 }

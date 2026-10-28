@@ -21,8 +21,11 @@ const FWMARK: &str = "0x40000000";
 /// leaves the queue alone. `nft` names a group of `/etc/group`, so it has to exist.
 pub const GROUP: &str = "zapret-bypass";
 
-/// The cgroup v2 whose processes' sockets leave the queue whole: `socket cgroupv2 level 1`
-/// matches them, and the monitor writes matching PIDs into its `cgroup.procs`.
+/// The legacy cgroup of the first releases: the monitor moved whole processes into it, and
+/// cgroup v2 passes to every child at fork — an excluded agent or launcher then carried the
+/// bypass mark onto everything it ever started, the app and its test `curl`s included. The
+/// exclusion now works through the dynamic port sets alone, and the stale cgroup is emptied
+/// and removed wherever the table is applied.
 pub const CGROUP: &str = "/sys/fs/cgroup/zapret_bypass";
 
 /// The table file the `zapret2` service's `ExecStartPre` applies and `ExecStopPost` deletes.
@@ -60,20 +63,14 @@ pub fn translate(tail: &str) -> (String, String, String) {
 /// `table` before `delete` makes the removal not fail on the first ever apply; the final `table`
 /// builds the queue's rules again for the `mark`-kept packets to pass, the matched ones entering
 /// queue 200 while the connection is young. Loopback stays out: queued loopback packets stall
-/// local connections, and no DPI lives there.
-///
-/// `with_cgroupv2` adds `socket cgroupv2 level 1 "zapret_bypass" return`: the sockets of the
-/// processes the monitor put into `/sys/fs/cgroup/zapret_bypass` leave the queue on the very
-/// first SYN. Kernels without `socket cgroupv2` in nft call it a syntax error, so `apply` retries
-/// without it instead of failing.
-pub fn table(tcp_ports: &str, udp_ports: &str, excluded_ports: &str, with_cgroupv2: bool) -> String {
+/// local connections, and no DPI lives there. The excluded programs leave through the dynamic
+/// `@bypass_*_ports` sets of their own open ports alone: a cgroup mark would pass to every
+/// child the excluded process ever starts, the app itself included.
+pub fn table(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> String {
     // Before the queue rules: the group and the excluded ports go through untouched, and only
     // the rest of the traffic reaches the queue.
     let mut rules = format!("        meta skgid {GROUP} return\n");
-    if with_cgroupv2 {
-        rules.push_str("        socket cgroupv2 level 1 \"zapret_bypass\" return\n");
-    }
-    
+
     if !excluded_ports.is_empty() {
         rules.push_str(&format!("        th dport {{ {excluded_ports} }} return\n"));
         rules.push_str(&format!("        th sport {{ {excluded_ports} }} return\n"));
@@ -135,37 +132,45 @@ fn ensure_group() {
     }
 }
 
-/// Makes `/sys/fs/cgroup/zapret_bypass` exist so `meta skgid zapret-bypass` and
-/// `socket cgroupv2 level 1 "zapret_bypass"` can match the processes the monitor moves there.
-pub fn ensure_cgroup() {
-    if let Err(err) = zapret::root::run("mkdir", &["-p", CGROUP]) {
-        log::warn!("cannot create {CGROUP}: {err:#}");
+/// The legacy `zapret_bypass` cgroup goes away: its processes return to the root cgroup and the
+/// directory is removed. Best effort — a mount without cgroup v2 or a gone directory is fine.
+pub fn remove_cgroup() {
+    let procs = std::path::Path::new(CGROUP).join("cgroup.procs");
+    if let Ok(list) = std::fs::read_to_string(&procs) {
+        let list = list.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !list.is_empty() {
+            // The root cgroup takes every pid back; its own `cgroup.procs` accepts the list.
+            let _ = zapret::root::run(
+                "sh",
+                &[
+                    "-c",
+                    &format!("printf '%s\\n' {list} > /sys/fs/cgroup/cgroup.procs"),
+                ],
+            );
+            log::info!("the processes of {CGROUP} are back in the root cgroup");
+        }
+    }
+    if let Err(err) = zapret::root::run("rmdir", &[CGROUP]) {
+        // Missing is the normal case; busy means a pid was spawned mid-evacuation.
+        log::debug!("rmdir {CGROUP}: {err:#}");
     }
 }
 
 /// Writes the table to {CONFIG} under root: the service can apply it at every start.
 pub fn write_config(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> anyhow::Result<()> {
-    ensure_cgroup();
-    let text = table(tcp_ports, udp_ports, excluded_ports, true);
+    remove_cgroup();
+    let text = table(tcp_ports, udp_ports, excluded_ports);
     ensure_group();
     zapret::root::write(std::path::Path::new(CONFIG), &text)
 }
 
 /// Applies the table now (the tests run `nfqws2` without a service): the file is a temp one,
-/// `nft -f` reads and keeps it. `socket cgroupv2` is tried first; on a kernel or an `nft` that
-/// does not know it, `nft -f` is retried without the bypass rule instead of failing.
+/// `nft -f` reads and keeps it.
 pub fn apply(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> anyhow::Result<()> {
-    ensure_cgroup();
+    remove_cgroup();
     ensure_group();
-    let text = table(tcp_ports, udp_ports, excluded_ports, true);
-    let applied = apply_text(&text);
-    if applied.is_err() {
-        // Older kernel/nft: `socket cgroupv2` is a syntax error. The cgroup itself still works
-        // through the port sets, so retry without the rule and keep the table alive.
-        let text = table(tcp_ports, udp_ports, excluded_ports, false);
-        return apply_text(&text);
-    }
-    applied
+    let text = table(tcp_ports, udp_ports, excluded_ports);
+    apply_text(&text)
 }
 
 /// Applies one rendered table text through `nft -f`.
@@ -264,7 +269,7 @@ mod tests {
 
     #[test]
     fn the_table_matches_the_readme_shape() {
-        let text = table("443,80", "443", "51413, 6881-6889", true);
+        let text = table("443,80", "443", "51413, 6881-6889");
         for part in [
             "table inet zapret_hub",
             "delete table inet zapret_hub",
@@ -284,13 +289,14 @@ mod tests {
         let skgid = text.find("meta skgid").unwrap();
         let queue = text.find("queue num").unwrap();
         assert!(skgid < queue);
-        let empty = table("", "", "", false);
+        let empty = table("", "", "");
         assert!(empty.contains("policy accept;") && !empty.contains("queue num"));
         assert!(empty.contains("meta skgid") && !empty.contains("th dport"));
-        // A kernel without `socket cgroupv2` gets the table without the bypass rule.
-        let without = table("443,80", "443", "", false);
-        assert!(!without.contains("socket cgroupv2"));
-        assert!(without.contains("meta skgid zapret-bypass return"));
+        // No cgroup rule anywhere: a cgroup mark would pass to every child the excluded process
+        // ever starts, the app itself included.
+        let text = table("443,80", "443", "");
+        assert!(!text.contains("cgroupv2"));
+        assert!(text.contains("meta skgid zapret-bypass return"));
     }
 
     #[test]

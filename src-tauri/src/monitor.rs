@@ -1,7 +1,11 @@
 //! Background watch of the excluded programs. Every 1–2 s (and right after exclusions are saved)
-//! it scans `/proc`, matches processes against the enabled groups' `apps`, moves the matches into
-//! the `zapret_bypass` cgroup v2 so their sockets never reach nfqws2, and puts their open local
-//! ports into the nftables bypass sets `bypass_tcp_ports`/`bypass_udp_ports`.
+//! it scans `/proc`, matches processes against the enabled groups' `apps`, and puts their open
+//! local ports into the nftables bypass sets `bypass_tcp_ports`/`bypass_udp_ports`, so the
+//! sockets of the excluded programs never reach nfqws2.
+//!
+//! The exclusion works through the port sets alone: a cgroup mark would pass to every child the
+//! excluded process ever starts at fork (an agent or a launcher carries it onto everything it
+//! runs, the app itself included), so no process is ever moved anywhere.
 //!
 //! Everything here is best effort: a missing root, an absent table or a gone process is logged
 //! and retried on the next tick — the watch must never take the app down.
@@ -17,9 +21,11 @@ use crate::actions;
 use crate::exclusions;
 use crate::state::AppState;
 
-/// `/sys/fs/cgroup/zapret_bypass`: processes started here bypass nfqws2 through the nftables
-/// rules of `table inet zapret_hub`.
-const CGROUP: &str = "/sys/fs/cgroup/zapret_bypass";
+/// The processes the watch never touches: they are the app's own machinery, and a port of
+/// theirs in the bypass sets would send the engine's own traffic and the test checks past
+/// nfqws2. Matched exactly against the process name.
+const PROTECTED: &[&str] = &["zapret-hub", "zapret-hub-cli", "nfqws2", "nfq", "curl"];
+
 /// The tick when nothing wakes the watch up.
 const TICK: Duration = Duration::from_secs(2);
 /// `nft` needs the table before `add element` works on its sets.
@@ -31,7 +37,9 @@ pub fn start_monitor(handle: AppHandle, state: &AppState) -> mpsc::Sender<()> {
     let (tx, rx) = mpsc::channel();
     *state.monitor_wake.lock().unwrap() = Some(tx.clone());
     std::thread::spawn(move || {
-        log::info!("exclusions monitor: watching for {}", exclusions::DEFAULT_APPS.join(", "));
+        log::info!(
+            "exclusions monitor: watching the enabled groups' apps, ports into the nftables sets"
+        );
         // True until the first empty tick: the sets may still hold the ports of a run before
         // this one, so the first tick must flush even when nothing matches.
         let mut populated = true;
@@ -45,8 +53,8 @@ pub fn start_monitor(handle: AppHandle, state: &AppState) -> mpsc::Sender<()> {
     tx
 }
 
-/// One tick: read the groups, move matching processes into the cgroup, refresh the port sets.
-/// Nothing runs the `/proc` scan or a single `nft` while the groups hold no apps.
+/// One tick: read the groups, refresh the port sets of the matching processes. Nothing runs the
+/// `/proc` scan or a single `nft` while the groups hold no apps.
 fn sync_once(handle: &AppHandle, populated: &mut bool) -> anyhow::Result<()> {
     let state = actions::state(handle);
     let saved = exclusions::ExclusionRules::load(&state.paths)?;
@@ -56,28 +64,15 @@ fn sync_once(handle: &AppHandle, populated: &mut bool) -> anyhow::Result<()> {
         update_port_sets(&[], populated);
         return Ok(());
     }
-
-    let _ = zapret::root::run("mkdir", &["-p", CGROUP]);
     let pids = find_pids(&apps)?;
-    if !pids.is_empty() {
-        let list = pids
-            .iter()
-            .map(|pid| pid.to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
-        // `echo` is a shell builtin, so `sh -c` moves every matched pid at once.
-        let _ = zapret::root::run(
-            "sh",
-            &["-c", &format!("printf '%s\\n' {list} > {CGROUP}/cgroup.procs")],
-        );
-    }
     update_port_sets(&pids, populated);
     Ok(())
 }
 
 /// The PIDs of all processes whose name matches an exclusion app, plus their descendants: comm
 /// (`opencode-cli`), the executable's file name, and the first command-line word (`/usr/bin/opencode`),
-/// matched case-insensitively and as a substring, so `opencode` catches `opencode-cli` too.
+/// matched case-insensitively and as a substring, so `opencode` catches `opencode-cli` too. The
+/// app's own machinery (`PROTECTED`) never lands here, whatever an excluded process started.
 fn find_pids(apps: &[String]) -> anyhow::Result<Vec<u32>> {
     let entries: Vec<u32> = std::fs::read_dir("/proc")?
         .filter_map(|entry| entry.ok())
@@ -93,7 +88,11 @@ fn find_pids(apps: &[String]) -> anyhow::Result<Vec<u32>> {
     let mut matched: Vec<u32> = Vec::new();
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     for pid in &entries {
-        if apps.iter().any(|app| exclusions::app_matches(&process_name(pid), app)) {
+        let name = process_name(pid);
+        if PROTECTED.contains(&name.as_str()) {
+            continue;
+        }
+        if apps.iter().any(|app| exclusions::app_matches(&name, app)) {
             matched.push(*pid);
         }
         if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
@@ -115,6 +114,9 @@ fn find_pids(apps: &[String]) -> anyhow::Result<Vec<u32>> {
     let mut todo: VecDeque<u32> = matched.into_iter().collect();
     while let Some(pid) = todo.pop_front() {
         if !seen.insert(pid) {
+            continue;
+        }
+        if PROTECTED.contains(&process_name(&pid).as_str()) {
             continue;
         }
         out.push(pid);
