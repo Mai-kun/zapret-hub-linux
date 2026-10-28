@@ -1,30 +1,45 @@
 //! Background watch of the excluded programs. Every 1–2 s (and right after exclusions are saved)
-//! it scans `/proc`, matches processes against the enabled groups' `apps`, and puts their open
-//! local ports into the nftables bypass sets `bypass_tcp_ports`/`bypass_udp_ports`, so the
-//! sockets of the excluded programs never reach nfqws2.
+//! it scans `/proc`, matches processes against the enabled groups' `apps`, puts the matches' own
+//! PIDs into the `zapret_bypass` cgroup v2 — their sockets leave the nftables queue on the very
+//! first SYN — and fills the nftables bypass sets `bypass_tcp_ports`/`bypass_udp_ports` with
+//! their open local ports, for the sockets opened before the tick.
 //!
-//! The exclusion works through the port sets alone: a cgroup mark would pass to every child the
-//! excluded process ever starts at fork (an agent or a launcher carries it onto everything it
-//! runs, the app itself included), so no process is ever moved anywhere.
+//! Two guards keep the cgroup from poisoning anyone else: only a process whose own name matches
+//! an app enters it (never a parent, a terminal or a launcher), and every tick evicts anything
+//! found inside whose own name matches no app — an excluded agent's children (the app itself, a
+//! test `curl`) inherited the mark at fork and come back to the root cgroup at once.
 //!
 //! Everything here is best effort: a missing root, an absent table or a gone process is logged
 //! and retried on the next tick — the watch must never take the app down.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use tauri::AppHandle;
+use zapret2::nft::CGROUP;
 
 use crate::actions;
 use crate::exclusions;
 use crate::state::AppState;
 
-/// The processes the watch never touches: they are the app's own machinery, and a port of
-/// theirs in the bypass sets would send the engine's own traffic and the test checks past
-/// nfqws2. Matched exactly against the process name.
-const PROTECTED: &[&str] = &["zapret-hub", "zapret-hub-cli", "nfqws2", "nfq", "curl"];
+/// The processes the watch never touches, matched exactly against the process name: the app's
+/// own machinery, and the shells and builders an excluded agent spawns — their traffic must
+/// never bypass nfqws2, whatever their parent is.
+pub const PROTECTED: &[&str] = &[
+    "zapret-hub",
+    "zapret-hub-cli",
+    "nfqws2",
+    "nfq",
+    "curl",
+    "sh",
+    "bash",
+    "fish",
+    "zsh",
+    "cargo",
+    "rustc",
+];
 
 /// The tick when nothing wakes the watch up.
 const TICK: Duration = Duration::from_secs(2);
@@ -38,7 +53,8 @@ pub fn start_monitor(handle: AppHandle, state: &AppState) -> mpsc::Sender<()> {
     *state.monitor_wake.lock().unwrap() = Some(tx.clone());
     std::thread::spawn(move || {
         log::info!(
-            "exclusions monitor: watching the enabled groups' apps, ports into the nftables sets"
+            "exclusions monitor: watching the enabled groups' apps into {} and the nftables sets",
+            CGROUP
         );
         // True until the first empty tick: the sets may still hold the ports of a run before
         // this one, so the first tick must flush even when nothing matches.
@@ -53,26 +69,105 @@ pub fn start_monitor(handle: AppHandle, state: &AppState) -> mpsc::Sender<()> {
     tx
 }
 
-/// One tick: read the groups, refresh the port sets of the matching processes. Nothing runs the
-/// `/proc` scan or a single `nft` while the groups hold no apps.
+/// At the app's start: this very process must not keep the bypass mark it inherited at fork from
+/// an excluded agent (the app started from such an agent's terminal). The move goes through
+/// `sudo` — a plain user cannot write the root cgroup's `cgroup.procs`; a refusal is logged and
+/// the watch's first tick evicts this pid the same way.
+pub fn evict_self() {
+    let Ok(self_cgroup) = std::fs::read_to_string("/proc/self/cgroup") else {
+        return;
+    };
+    if !self_cgroup.contains("zapret_bypass") {
+        return;
+    }
+    match zapret::root::run(
+        "sh",
+        &[
+            "-c",
+            &format!("echo {} > /sys/fs/cgroup/cgroup.procs", std::process::id()),
+        ],
+    ) {
+        Ok(_) => log::info!("this process left the zapret_bypass cgroup"),
+        Err(err) => log::warn!("cannot leave zapret_bypass: {err:#}"),
+    }
+}
+
+/// One tick: evict the inherited strangers, move the matches' own PIDs into the cgroup, refresh
+/// the port sets. Nothing runs the `/proc` scan or a single `nft` while the groups hold no apps.
 fn sync_once(handle: &AppHandle, populated: &mut bool) -> anyhow::Result<()> {
     let state = actions::state(handle);
     let saved = exclusions::ExclusionRules::load(&state.paths)?;
     let apps: Vec<String> = saved.enabled_apps();
+    evict_foreign(&apps);
     if apps.is_empty() {
         // The groups went away: what their ports left in the sets is flushed once, then silence.
         update_port_sets(&[], populated);
         return Ok(());
     }
     let pids = find_pids(&apps)?;
+    if !pids.is_empty() {
+        // The cgroup appears with the table, but the watch may tick first: create it here too.
+        zapret2::nft::ensure_cgroup();
+        let list = pids
+            .iter()
+            .map(|pid| pid.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        // `echo` is a shell builtin, so `sh -c` moves every matched pid at once.
+        let _ = zapret::root::run(
+            "sh",
+            &["-c", &format!("printf '%s\\n' {list} > {CGROUP}/cgroup.procs")],
+        );
+    }
     update_port_sets(&pids, populated);
     Ok(())
 }
 
-/// The PIDs of all processes whose name matches an exclusion app, plus their descendants: comm
-/// (`opencode-cli`), the executable's file name, and the first command-line word (`/usr/bin/opencode`),
-/// matched case-insensitively and as a substring, so `opencode` catches `opencode-cli` too. The
-/// app's own machinery (`PROTECTED`) never lands here, whatever an excluded process started.
+/// Anything inside the bypass cgroup whose own name matches none of the active apps goes back to
+/// the root cgroup at once: cgroup v2 hands the mark to every forked child, and an excluded
+/// agent's `bash` → `zapret-hub` → `curl` chain must never keep it.
+pub fn evict_foreign(apps: &[String]) {
+    let Ok(list) = std::fs::read_to_string(format!("{CGROUP}/cgroup.procs")) else {
+        return; // no cgroup, no cgroup v2: nothing to watch
+    };
+    let strangers: Vec<String> = list
+        .split_whitespace()
+        .filter(|pid| {
+            let name = process_name(&pid.parse::<u32>().unwrap_or(0));
+            !PROTECTED.contains(&name.as_str())
+                && !apps.iter().any(|app| exclusions::app_matches(&name, app))
+        })
+        .map(|pid| pid.to_owned())
+        .collect();
+    if strangers.is_empty() {
+        return;
+    }
+    let _ = zapret::root::run(
+        "sh",
+        &[
+            "-c",
+            &format!(
+                "printf '%s\\n' {} > /sys/fs/cgroup/cgroup.procs",
+                strangers.join(" ")
+            ),
+        ],
+    );
+    log::info!(
+        "evicted from {CGROUP}: {}",
+        strangers
+            .iter()
+            .map(|pid| format!("{pid} ({})", process_name(&pid.parse().unwrap_or(0))))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+}
+
+/// The PIDs of the processes whose own name matches an exclusion app — and nobody else's: a
+/// matched process's children inherit the cgroup at fork and are evicted back by `evict_foreign`
+/// instead of ever being matched here. The name is `comm`, the executable's file name, or the
+/// first command-line word (`/usr/bin/opencode`), case-insensitively, as a substring — so
+/// `opencode` catches `opencode-cli` too. The app's own machinery (`PROTECTED`) never lands
+/// here, whatever started it.
 fn find_pids(apps: &[String]) -> anyhow::Result<Vec<u32>> {
     let entries: Vec<u32> = std::fs::read_dir("/proc")?
         .filter_map(|entry| entry.ok())
@@ -85,50 +180,23 @@ fn find_pids(apps: &[String]) -> anyhow::Result<Vec<u32>> {
         })
         .collect();
 
-    let mut matched: Vec<u32> = Vec::new();
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for pid in &entries {
-        let name = process_name(pid);
-        if PROTECTED.contains(&name.as_str()) {
-            continue;
-        }
-        if apps.iter().any(|app| exclusions::app_matches(&name, app)) {
-            matched.push(*pid);
-        }
-        if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
-            for line in status.lines() {
-                if let Some(parent) = line
-                    .strip_prefix("PPid:")
-                    .and_then(|text| text.trim().parse::<u32>().ok())
-                {
-                    children.entry(parent).or_default().push(*pid);
-                    break;
-                }
-            }
-        }
-    }
-
-    // Matched processes and everything they started: children, grandchildren, …
-    let mut out: Vec<u32> = Vec::new();
-    let mut seen: HashSet<u32> = HashSet::new();
-    let mut todo: VecDeque<u32> = matched.into_iter().collect();
-    while let Some(pid) = todo.pop_front() {
-        if !seen.insert(pid) {
-            continue;
-        }
-        if PROTECTED.contains(&process_name(&pid).as_str()) {
-            continue;
-        }
-        out.push(pid);
-        if let Some(kids) = children.get(&pid) {
-            todo.extend(kids.iter().copied());
-        }
-    }
-    Ok(out)
+    Ok(entries
+        .into_iter()
+        .map(|pid| {
+            let name = process_name(&pid);
+            (pid, name)
+        })
+        .filter(|(_, name)| !PROTECTED.contains(&name.as_str()))
+        .filter(|(_, name)| {
+            apps.iter()
+                .any(|app| exclusions::app_matches(name, app))
+        })
+        .map(|(pid, _)| pid)
+        .collect())
 }
 
 /// `comm`, then the file name of `exe` and of `cmdline[0]` — whatever is readable.
-fn process_name(pid: &u32) -> String {
+pub(crate) fn process_name(pid: &u32) -> String {
     if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
         let name = comm.trim();
         if !name.is_empty() {
@@ -333,17 +401,6 @@ mod tests {
         }
     }
 
-    /// Reads `status` for `PPid` the way `find_pids` does, rooted at `root/proc`.
-    fn read_ppid(root: &Path, pid: u32) -> Option<u32> {
-        std::fs::read_to_string(root.join("proc").join(pid.to_string()).join("status"))
-            .ok()
-            .and_then(|status| {
-                status
-                    .lines()
-                    .find_map(|line| line.strip_prefix("PPid:").and_then(|text| text.trim().parse().ok()))
-            })
-    }
-
     #[test]
     fn process_name_reads_comm_cmdline_and_exe() {
         let root = ProcRoot::new().unwrap();
@@ -355,55 +412,34 @@ mod tests {
     }
 
     #[test]
-    fn find_pids_matches_comm_cmdline_basename_and_descendants() {
+    fn matching_is_by_own_name_only_and_protected_never_matches() {
         let root = ProcRoot::new().unwrap();
         root.add(1, "init", &["/sbin/init"], Some("/sbin/init"), &[]).unwrap();
         root.add(10, "opencode", &["opencode"], Some("/usr/bin/opencode"), &[]).unwrap();
         root.add(11, "opencode-cli", &["/opt/OPAQUE/opencode-cli"], Some("/opt/x/opencode-cli"), &[]).unwrap();
         root.add(12, "firefox", &["firefox"], Some("/usr/lib/firefox"), &[]).unwrap();
-        root.add(13, "node", &["node"], Some("/usr/bin/node"), &[]).unwrap();
-        root.status(1, 0).unwrap();
+        root.add(13, "node", &["node"], Some("/usr/bin/node"), &[]).unwrap(); // a child of 10
+        root.add(14, "curl", &["curl"], Some("/usr/bin/curl"), &[]).unwrap(); // also a child of 10
         root.status(10, 1).unwrap();
-        root.status(11, 10).unwrap(); // 11 is a child of 10
-        root.status(12, 1).unwrap();
-        root.status(13, 11).unwrap(); // 13 is a grandchild of 10 through 11
+        root.status(11, 10).unwrap();
+        root.status(13, 11).unwrap();
+        root.status(14, 11).unwrap();
 
-        // The real watch roots everything at /proc; here we mirror its logic over the fake tree.
+        // The watch matches a process by its own name alone: the children an excluded app
+        // spawned (`node`, `curl`) are matched no more — the cgroup mark they inherited at fork
+        // is what `evict_foreign` takes back out.
         let apps = vec!["opencode".to_owned()];
-        let entries: Vec<u32> = std::fs::read_dir(root.proc())
-            .unwrap()
-            .filter_map(|entry| entry.ok())
-            .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
-            .collect();
-        let matched: Vec<u32> = entries
-            .iter()
-            .filter(|pid| {
+        let matched: Vec<u32> = [1u32, 10, 11, 12, 13, 14]
+            .into_iter()
+            .map(|pid| (pid, process_name_root(root.root(), pid)))
+            .filter(|(_, name)| !PROTECTED.contains(&name.as_str()))
+            .filter(|(_, name)| {
                 apps.iter()
-                    .any(|app| exclusions::app_matches(&process_name_root(root.root(), **pid), app))
+                    .any(|app| exclusions::app_matches(name, app))
             })
-            .copied()
+            .map(|(pid, _)| pid)
             .collect();
-        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-        // PPid of every process is scanned, not only of the first matches.
-        for pid in &entries {
-            if let Some(parent) = read_ppid(root.root(), *pid) {
-                children.entry(parent).or_default().push(*pid);
-            }
-        }
-        let mut out: Vec<u32> = Vec::new();
-        let mut seen: HashSet<u32> = HashSet::new();
-        let mut todo: VecDeque<u32> = matched.into_iter().collect();
-        while let Some(pid) = todo.pop_front() {
-            if !seen.insert(pid) {
-                continue;
-            }
-            out.push(pid);
-            if let Some(kids) = children.get(&pid) {
-                todo.extend(kids.iter().copied());
-            }
-        }
-        out.sort_unstable();
-        assert_eq!(out, [10, 11, 13]);
+        assert_eq!(matched, [10, 11]);
     }
 
     #[test]

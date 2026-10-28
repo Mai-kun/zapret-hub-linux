@@ -45,6 +45,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
         ])
         .commands(collect_commands![
             commands::app_version,
+            commands::running_apps,
             commands::get_settings,
             commands::save_settings,
             commands::get_overview,
@@ -137,6 +138,9 @@ fn fatal(text: &str) {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    // Before anything spawns: a start from an excluded agent's terminal inherits its cgroup,
+    // and the table's `socket cgroupv2` rule would send this app's whole traffic past nfqws2.
+    monitor::evict_self();
     let paths = Paths::current()?;
     journal::init(paths.logs());
     log::info!(

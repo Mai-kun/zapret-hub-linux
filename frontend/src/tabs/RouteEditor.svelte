@@ -3,6 +3,7 @@
   import { call } from "$lib/api";
   import { app, change } from "$lib/app.svelte";
   import Select from "../components/Select.svelte";
+  import RunningApps from "../components/RunningApps.svelte";
   import { lines, routeDraft, routeFieldText } from "$lib/format";
   import { notices } from "$lib/notices.svelte";
   import { S } from "$lib/strings";
@@ -139,6 +140,13 @@
     </div>
     <textarea id="route-apps" rows="6" bind:value={apps} oninput={() => mark("apps")}></textarea>
     {@render fieldErrors("apps")}
+    <RunningApps
+      current={apps}
+      add={(name) => {
+        apps = apps.trim() ? `${apps.trimEnd()}\n${name}` : name;
+        mark("apps");
+      }}
+    />
   </div>
 </div>
 {#if draft.apps.length > 0 && draft.ports.length === 0 && draft.protocol !== "tcp"}<p class="muted hint">{S.routes.appsHint}</p>{/if}

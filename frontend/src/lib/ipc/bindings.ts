@@ -6,6 +6,12 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 /** Commands */
 export const commands = {
 	appVersion: () => __TAURI_INVOKE<string>("app_version"),
+	/**
+	 *  The names of the user's own running processes, sorted and unique: quick chips for the
+	 *  exclusions editor's «Программы» field. Kernel threads (no `exe`) and the app's own machinery
+	 *  are not offered; the user picks from what is actually running, not from memory.
+	 */
+	runningApps: () => __TAURI_INVOKE<string[]>("running_apps"),
 	getSettings: () => __TAURI_INVOKE<Settings>("get_settings"),
 	saveSettings: (settings: Settings) => typedError<null, string>(__TAURI_INVOKE("save_settings", { settings })),
 	getOverview: () => typedError<Overview, string>(__TAURI_INVOKE("get_overview")),
@@ -389,7 +395,10 @@ export type FixAction =
  *  the snapshot is restored or the strategy applied again.
  */
 { kind: "restore_service" } | 
-/**  Empty or missing `.bin` files of the bin folder: a non-empty donor is copied over them. */
+/**
+ *  Empty lists of the built-in set and empty or missing `.bin` files: the built-in text and
+ *  a non-empty fake or donor are written over them.
+ */
 { kind: "repair_bins" } | 
 /**  Outside engine processes and foreign `zapret*` nftables: they take the queue's packets. */
 { kind: "kill_conflicts" } | 

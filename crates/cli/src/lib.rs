@@ -404,7 +404,7 @@ mod tests {
     }
 
     /// Window commands the CLI leaves out (spec 6).
-    const WINDOW_ONLY: [&str; 16] = [
+    const WINDOW_ONLY: [&str; 17] = [
         "detect_folders",
         "check_zapret2_folder",
         "pick_folder",
@@ -425,6 +425,8 @@ mod tests {
         "import_route_lines",
         // `xdg-open` of the `tg://proxy` link: a command that opens a program.
         "open_tg_proxy",
+        // The editor's «Программы» chips: the running processes of the user's session.
+        "running_apps",
     ];
 
     /// `("cmd", { a, b })` → the argument names in `bindings.ts`, sorted.

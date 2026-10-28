@@ -8,6 +8,7 @@
   import { bytes, programName, proxyLabel, routeSummary, trafficLabel, viaLabel } from "$lib/format";
   import { plural, S } from "$lib/strings";
   import RouteEditor from "./RouteEditor.svelte";
+  import RunningApps from "../components/RunningApps.svelte";
 
   let status = $state<RouterStatus | null>(null);
   let view = $state<RoutesView | null>(null);
@@ -230,6 +231,14 @@
     if (await saveExclusions(next)) editingExclusion = null;
   }
 
+  /** The clicked chip: the process joins the field on its own line. */
+  function addApp(name: string): void {
+    if (!editingExclusion) return;
+    editingExclusion.apps = editingExclusion.apps.trim()
+      ? `${editingExclusion.apps.trimEnd()}\n${name}`
+      : name;
+  }
+
   /** A short look at a rule: how many entries each target has. */
   const ruleSummary = (rule: ExclusionRule): string => {
     const parts: string[] = [];
@@ -371,6 +380,10 @@
               spellcheck="false"
               bind:value={editingExclusion.apps}
             ></textarea>
+            <RunningApps
+              current={editingExclusion.apps}
+              add={(name) => addApp(name)}
+            />
           </div>
           <div>
             <div class="field-header">

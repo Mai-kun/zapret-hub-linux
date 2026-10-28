@@ -16,6 +16,12 @@ pub const FILE_NAME: &str = "exclusions.toml";
 
 /// The groups created when there are no exclusions yet.
 pub const DEFAULT_NAME_APPS: &str = "🛡️ Программы без zapret";
+/// The AI agents and the developer tools excluded by default: their TLS ClientHello leaves in
+/// the first milliseconds, before any watch could catch a new port, so they go into the cgroup
+/// whose rule works on the first SYN. GitHub goes with them: a release or an API call must not
+/// be broken by a desync.
+pub const DEFAULT_APPS: &[&str] = &["zcode", "zcode-cli", "opencode", "opencode-cli", "gh", "git"];
+pub const DEFAULT_DOMAINS_APPS: &[&str] = &["github.com", "api.github.com"];
 
 pub const DEFAULT_NAME_RU: &str = "🇷🇺 Российские сайты и сервисы";
 pub const DEFAULT_DOMAINS_RU: &[&str] = &[
@@ -201,14 +207,14 @@ pub(crate) fn default_rules() -> Vec<ExclusionRule> {
 fn default_rule_apps() -> ExclusionRule {
     ExclusionRule {
         name: DEFAULT_NAME_APPS.to_owned(),
-        // Off with no apps: the user adds what they really need to bypass. An app excluded by
-        // default (the agent `opencode` once shipped here) carries the exclusion onto everything
-        // it starts — the app itself and its test checks included.
-        enabled: false,
-        domains: Vec::new(),
+        // On with the agents and the developer tools: an excluded app never carries the mark
+        // onto anything it starts — only its own PIDs enter the cgroup, and the watch evicts
+        // every stranger found there back to the root cgroup.
+        enabled: true,
+        domains: DEFAULT_DOMAINS_APPS.iter().map(|d| d.to_string()).collect(),
         ips: Vec::new(),
         ports: Vec::new(),
-        apps: Vec::new(),
+        apps: DEFAULT_APPS.iter().map(|app| app.to_string()).collect(),
     }
 }
 
@@ -370,9 +376,10 @@ ports = ["443"]
         };
         let group = rules.default_group();
         assert_eq!(group.name, DEFAULT_NAME_APPS);
-        // Off and empty by default: the user adds the apps they really need to bypass.
-        assert!(!group.enabled);
-        assert_eq!(group.apps, Vec::<String>::new());
+        // The agents and the developer tools are excluded out of the box, with GitHub alongside.
+        assert!(group.enabled);
+        assert_eq!(group.apps, DEFAULT_APPS);
+        assert_eq!(group.domains, DEFAULT_DOMAINS_APPS);
         assert!(rules.rules.iter().any(|rule| rule.name == DEFAULT_NAME_APPS));
     }
 }

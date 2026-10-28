@@ -52,6 +52,60 @@ pub fn app_version() -> String {
     format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("ZH_COMMIT"))
 }
 
+/// The names of the user's own running processes, sorted and unique: quick chips for the
+/// exclusions editor's «Программы» field. Kernel threads (no `exe`) and the app's own machinery
+/// are not offered; the user picks from what is actually running, not from memory.
+#[tauri::command]
+#[specta::specta]
+pub fn running_apps() -> Vec<String> {
+    // The real uid of this process, straight from the kernel's own account of it.
+    let euid = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("Uid:")
+                    .and_then(|uids| uids.split_whitespace().next())
+                    .and_then(|uid| uid.parse::<u32>().ok())
+            })
+        });
+    let Some(euid) = euid else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = std::fs::read_dir("/proc")
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+                .filter(|pid| {
+                    // Kernel threads have no executable: they are nobody's apps.
+                    std::fs::symlink_metadata(format!("/proc/{pid}/exe")).is_ok()
+                })
+                .filter(|pid| {
+                    std::fs::read_to_string(format!("/proc/{pid}/status"))
+                        .ok()
+                        .and_then(|status| {
+                            status.lines().find_map(|line| {
+                                line.strip_prefix("Uid:")
+                                    .and_then(|uids| uids.split_whitespace().next())
+                                    .and_then(|uid| uid.parse::<u32>().ok())
+                            })
+                        })
+                        .is_some_and(|uid| uid == euid)
+                })
+                .filter(|pid| {
+                    !crate::monitor::PROTECTED
+                        .contains(&crate::monitor::process_name(pid).as_str())
+                })
+                .map(|pid| crate::monitor::process_name(&pid))
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    names
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn get_settings(state: State<'_, AppState>) -> Settings {

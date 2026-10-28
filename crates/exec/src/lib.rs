@@ -61,6 +61,23 @@ impl Output {
     }
 }
 
+/// A process that inherited the `zapret_bypass` cgroup at fork from an excluded agent leaves it
+/// at once: the table's `socket cgroupv2` rule would send this program's whole traffic past
+/// nfqws2. The move to the root cgroup succeeds for root or a delegated user; a plain user's
+/// failed write is left to the app's own eviction, which runs through `sudo`.
+fn leave_bypass_cgroup() {
+    let Ok(self_cgroup) = std::fs::read_to_string("/proc/self/cgroup") else {
+        return;
+    };
+    if !self_cgroup.contains("zapret_bypass") {
+        return;
+    }
+    match std::fs::write("/sys/fs/cgroup/cgroup.procs", std::process::id().to_string()) {
+        Ok(()) => log::info!(target: "exec", "this process left the zapret_bypass cgroup"),
+        Err(err) => log::debug!(target: "exec", "cannot leave zapret_bypass: {err}"),
+    }
+}
+
 /// Runs `cmd` to the end, or kills it and everything it started after `timeout` or once `cancel`
 /// turns true. When `run` returns it has ended every process the program started, so long-lived
 /// processes must not be started through it.
@@ -69,6 +86,7 @@ pub fn run(
     timeout: Duration,
     cancel: Option<&AtomicBool>,
 ) -> std::io::Result<Output> {
+    leave_bypass_cgroup();
     let command = command_line(cmd);
     let started = Instant::now();
     // Its own process group, so a `killpid(-pid)` ends the forks and grandchildren too.
