@@ -1,9 +1,19 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use zapret::procs::Winws;
 use zapret::service::{SvcState, config, parse_timestamps, state};
+
+/// The systemd tests read the real service manager: they only make sense where one answers.
+/// A CI container runs without a working systemd.
+fn systemd_answers() -> bool {
+    Path::new("/run/systemd/system").exists()
+        && Command::new("systemctl")
+            .args(["is-active", "--quiet", "systemd-journald"])
+            .status()
+            .is_ok_and(|status| status.success())
+}
 
 #[test]
 fn reads_the_timestamps_value_as_the_kernel_keeps_it() {
@@ -14,6 +24,10 @@ fn reads_the_timestamps_value_as_the_kernel_keeps_it() {
 
 #[test]
 fn reads_service_states_through_systemd() {
+    if !systemd_answers() {
+        eprintln!("no working systemd on this host: skipped");
+        return;
+    }
     assert_eq!(state("systemd-journald"), SvcState::Running);
     assert_eq!(state("zapret-hub-no-such-service"), SvcState::NotInstalled);
     assert!(!zapret::service::active_services().is_empty());
@@ -21,6 +35,10 @@ fn reads_service_states_through_systemd() {
 
 #[test]
 fn reads_a_service_config_from_the_unit_file() {
+    if !systemd_answers() {
+        eprintln!("no working systemd on this host: skipped");
+        return;
+    }
     // systemd-timesyncd's ExecStart is one binary, and it is wanted at boot.
     let cfg = config("systemd-timesyncd").expect("the unit file has an ExecStart");
     assert!(
@@ -93,11 +111,13 @@ fn finds_a_process_with_its_arguments() {
         .find(|p| p.pid == child.id())
         .expect("our ping is listed");
     assert_eq!(ours.args, ["-c", "20", "127.0.0.1"]);
-    assert!(
-        ours.exe
-            .as_ref()
-            .is_some_and(|e| e.to_string_lossy().ends_with("ping")),
-        "{:?}",
+    // sysinfo's exe follows what the kernel itself tells: a hardened /proc hides exe paths, and
+    // then the search result is `None` there too.
+    let kernel = std::fs::read_link(format!("/proc/{}/exe", child.id())).ok();
+    assert_eq!(
+        ours.exe.as_deref().map(Path::file_name),
+        kernel.as_deref().map(Path::file_name),
+        "{:?} vs {kernel:?}",
         ours.exe
     );
     child.kill().unwrap();
