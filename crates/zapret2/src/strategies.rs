@@ -2,6 +2,8 @@
 //! the command line a text becomes, and the static part of the check.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::time::SystemTime;
 
 use anyhow::Context as _;
 use zapret::{quoted_tokens, replace_ci};
@@ -428,6 +430,46 @@ pub fn tail(engine: &Engine, text: &str, game_filter: bool) -> anyhow::Result<St
     Ok(format!("--chdir=\"{}\" {args}", engine.root().display()))
 }
 
+/// The `lua\*.lua` texts of one folder and the mtimes they were read at. `check` runs for every
+/// strategy of the list, and re-reading the files 24 times per `list_strategies` held the tab
+/// for hundreds of milliseconds.
+static LUA_CACHE: Mutex<Option<LuaCache>> = Mutex::new(None);
+
+struct LuaCache {
+    files: Vec<(PathBuf, Option<SystemTime>)>,
+    sources: Vec<String>,
+}
+
+/// The `lua\*.lua` sources of `lua`, read again only when a file appeared, disappeared or
+/// changed (its mtime moved): the list's check stats the folder instead of reading it. One
+/// folder at a time: another folder's call just reads its own.
+fn lua_sources(lua: &Path) -> anyhow::Result<Vec<String>> {
+    let mut files: Vec<(PathBuf, Option<SystemTime>)> = std::fs::read_dir(lua)
+        .with_context(|| lua.display().to_string())?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "lua"))
+        .map(|path| {
+            let modified = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+            (path, modified)
+        })
+        .collect();
+    files.sort();
+    let mut cache = LUA_CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(hit) = cache.as_ref().filter(|hit| hit.files == files) {
+        return Ok(hit.sources.clone());
+    }
+    let sources = files
+        .iter()
+        .map(|(path, _)| zapret::read_text(path).with_context(|| path.display().to_string()))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    *cache = Some(LuaCache {
+        files,
+        sources: sources.clone(),
+    });
+    Ok(sources)
+}
+
 /// A lenient first pass over what `--dry-run` cannot see (spec 5.3), not winws2's own option
 /// parsing: every `--lua-desync=<function>` must be defined as `function <name>(` in some
 /// `lua\*.lua` (one this strategy loads or not), in `--lua-init=<code>` or in a
@@ -441,14 +483,7 @@ pub fn check(engine: &Engine, tail: &str) -> anyhow::Result<()> {
         !tail.contains("\\\""),
         "the command line has \\\" (a path ending in \\ right before a quote), which winws2 reads as a quote inside the value: {tail}"
     );
-    let lua = engine.lua();
-    let mut sources = Vec::new();
-    for entry in std::fs::read_dir(&lua).with_context(|| lua.display().to_string())? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|ext| ext == "lua") {
-            sources.push(zapret::read_text(&path).with_context(|| path.display().to_string())?);
-        }
-    }
+    let mut sources = lua_sources(&engine.lua())?;
     let tokens: Vec<String> = quoted_tokens(tail)
         .into_iter()
         .map(|token| token.replace('"', ""))
@@ -514,4 +549,27 @@ pub fn split(args: &str) -> (String, Vec<String>) {
         .collect::<Vec<_>>()
         .join(" ");
     (global, profiles)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lua_sources_are_cached_until_a_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let lua = dir.path().join("lua");
+        std::fs::create_dir_all(&lua).unwrap();
+        std::fs::write(lua.join("a.lua"), "function f(").unwrap();
+        std::fs::write(lua.join("note.txt"), "not a lua file").unwrap();
+        assert_eq!(lua_sources(&lua).unwrap(), ["function f("]);
+        // The unchanged folder answers from the cache…
+        assert_eq!(lua_sources(&lua).unwrap(), ["function f("]);
+        // …a changed file is read again…
+        std::fs::write(lua.join("a.lua"), "function g(").unwrap();
+        assert_eq!(lua_sources(&lua).unwrap(), ["function g("]);
+        // …and a new one joins in the sorted order.
+        std::fs::write(lua.join("b.lua"), "function h(").unwrap();
+        assert_eq!(lua_sources(&lua).unwrap(), ["function g(", "function h("]);
+    }
 }
