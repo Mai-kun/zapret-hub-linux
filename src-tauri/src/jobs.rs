@@ -171,6 +171,9 @@ fn background_check(app: &AppHandle) {
 /// Before anything else changes zapret, an interrupted operation is put back (spec 10).
 fn startup(app: &AppHandle) {
     recover(app);
+    // The engines of an older version follow the hub before anything raises a service: an
+    // ExecStart pointing at the old paths would fail a service that is otherwise fine.
+    crate::migrate::run(app);
     raise_services(app);
     let state = state(app);
     // Routing comes back as it was left (router spec 3).

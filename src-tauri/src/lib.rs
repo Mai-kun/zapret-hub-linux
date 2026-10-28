@@ -10,6 +10,7 @@ mod exclusions;
 mod monitor;
 mod jobs;
 mod journal;
+mod migrate;
 mod notify;
 mod routing;
 mod settings;
@@ -104,6 +105,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::route_flows,
             commands::doctor,
             commands::probe,
+            commands::diagnose_service,
             commands::fix_doctor_issue,
             commands::fix_all_doctor_issues,
             commands::validate_route,

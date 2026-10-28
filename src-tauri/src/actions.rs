@@ -242,12 +242,16 @@ pub fn detect_folders() -> Detected {
     }
 }
 
-/// The cheap places a release is unpacked to, each with its direct subfolders: next to the app,
-/// the home folders, then fixed roots. Stops listing when the 800 ms budget is spent.
+/// The cheap places a release is unpacked to, each with its direct subfolders: the hub's own
+/// folder first (where a download lands), then the data home an older version unpacked into, then
+/// next to the app, the home folders, and fixed roots. Stops listing when the 800 ms budget is
+/// spent.
 /* shortcut: a near copy of the old zapret::folder::nearby_dirs, revive it when more callers appear */
 fn nearby_dirs() -> Vec<PathBuf> {
     let deadline = std::time::Instant::now() + Duration::from_millis(800);
     let mut roots: Vec<PathBuf> = Vec::new();
+    roots.push(zapret::release::default_parent());
+    roots.push(zapret::release::legacy_parent());
     if let Some(app) = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))

@@ -24,14 +24,42 @@ const API_URL: &str = "https://api.github.com/repos/valnesfjord/tg-ws-proxy-rs/r
 const DOWNLOAD_PREFIX: &str = "https://github.com/valnesfjord/tg-ws-proxy-rs/releases/download/";
 /// How the binary and any stray older `tg-ws-proxy` are named in the process table.
 const IMAGE: &str = "tg-ws-proxy";
+/// The folder's and the binary's own name inside the data home (`tg-ws-proxy/tg-ws-proxy`).
+const LEAF: &str = "tg-ws-proxy";
 
-/// `~/.local/share/tg-ws-proxy` (or `$XDG_DATA_HOME/tg-ws-proxy`): where the release is unpacked.
+/// `~/.local/share/zapret-hub/tg-ws-proxy` (`$XDG_DATA_HOME/zapret-hub/tg-ws-proxy`): where the
+/// release is unpacked. An install an older version left right in the data home moves here once.
 pub fn dir() -> PathBuf {
-    zapret::release::default_parent().join("tg-ws-proxy")
+    let dir = zapret::release::default_parent().join(LEAF);
+    migrate_dir(&dir);
+    dir
+}
+
+/// The old `~/.local/share/tg-ws-proxy`, into the hub while it is still there and the hub's slot
+/// is free or empty. A failure moves nothing: both stay where they are and the next call retries.
+fn migrate_dir(dir: &Path) {
+    let legacy = zapret::release::legacy_parent().join(LEAF);
+    if !legacy.is_dir() || legacy == dir {
+        return;
+    }
+    let free = !dir.exists()
+        || std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none());
+    if !free {
+        return;
+    }
+    match std::fs::rename(&legacy, dir) {
+        Ok(()) => log::info!("tg-ws-proxy moved into the hub: {}", dir.display()),
+        Err(err) => log::warn!("{} did not move into the hub: {err}", legacy.display()),
+    }
 }
 
 fn bin() -> PathBuf {
     dir().join(IMAGE)
+}
+
+/// The release's binary is on disk.
+pub fn installed() -> bool {
+    bin().is_file()
 }
 
 /// The installed release's tag, from `version.txt` next to the binary.
@@ -171,7 +199,7 @@ fn logs() -> String {
 pub fn status(app: &AppHandle) -> TgWsStatus {
     let settings = actions::state(app).settings();
     TgWsStatus {
-        installed: bin().is_file(),
+        installed: installed(),
         version: version(),
         running: is_active(),
         port: settings.tg_ws_port,
@@ -212,6 +240,31 @@ fn write_unit(settings: &Settings) -> anyhow::Result<()> {
         .with_context(|| format!("cannot write {}", path.display()))?;
     systemctl(&["daemon-reload"])
         .map_err(|err| err.context(format!("cannot reload {}", path.display())))
+}
+
+/// Once, after the folder moved into the hub: a unit still pointing at the old binary is
+/// rewritten and a running service restarted on it. Nothing when the unit is already current.
+pub fn migrate_unit(settings: &Settings) {
+    let Ok(path) = unit_path() else {
+        return;
+    };
+    let legacy_bin = zapret::release::legacy_parent().join(LEAF).join(IMAGE);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if !text.contains(&legacy_bin.display().to_string()) || !installed() {
+        return;
+    }
+    let restart = |()| if is_active() {
+        systemctl(&["restart", UNIT])
+    } else {
+        Ok(())
+    };
+    if let Err(err) = write_unit(settings).and_then(restart) {
+        log::warn!("юнит {UNIT} не переключён на путь в zapret-hub: {err:#}");
+    } else {
+        log::info!("юнит {UNIT} переключён на путь в zapret-hub");
+    }
 }
 
 /// A stray `tg-ws-proxy` older than ours keeps the port busy: stop it, ours takes the port
@@ -489,11 +542,11 @@ mod tests {
             ..Settings::default()
         };
         let text = unit_text(
-            Path::new("/home/user/.local/share/tg-ws-proxy/tg-ws-proxy"),
+            Path::new("/home/user/.local/share/zapret-hub/tg-ws-proxy/tg-ws-proxy"),
             &settings,
         )
         .unwrap();
-        assert!(text.contains("ExecStart=\"/home/user/.local/share/tg-ws-proxy/tg-ws-proxy\" --host 127.0.0.1 --port 1443 --secret abababababababababababababababab --fronting-domain example.com\n"), "{text}");
+        assert!(text.contains("ExecStart=\"/home/user/.local/share/zapret-hub/tg-ws-proxy/tg-ws-proxy\" --host 127.0.0.1 --port 1443 --secret abababababababababababababababab --fronting-domain example.com\n"), "{text}");
         assert!(text.contains("Restart=on-failure"), "{text}");
         assert!(text.contains("WantedBy=default.target"), "{text}");
     }

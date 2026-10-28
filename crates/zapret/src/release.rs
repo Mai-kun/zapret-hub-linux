@@ -110,15 +110,30 @@ pub fn select(engine: Engine, json: &str) -> anyhow::Result<Release> {
     })
 }
 
-/// Where a release goes unless the user picks another folder: `$XDG_DATA_HOME`, else
-/// `~/.local/share`. The folder is created here: `target` refuses a parent that does not exist.
+/// Where a release goes unless the user picks another folder: the hub folder inside
+/// `$XDG_DATA_HOME` (else `~/.local/share`), so every engine and utility stays inside
+/// `zapret-hub/`. The folder is created here: `target` refuses a parent that does not exist.
 pub fn default_parent() -> PathBuf {
-    let dir = data_home(
+    let dir = hub_dir(&data_home(
         std::env::var_os("XDG_DATA_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
-    );
+    ));
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// The data home as older versions left it — `$XDG_DATA_HOME` or `~/.local/share` itself, with
+/// the engines right in it: where a migration moves them out of.
+pub fn legacy_parent() -> PathBuf {
+    data_home(
+        std::env::var_os("XDG_DATA_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+/// The hub folder of a data home: `zapret-hub`, the one place the downloaded engines live.
+pub fn hub_dir(data: &Path) -> PathBuf {
+    data.join("zapret-hub")
 }
 
 /// `$XDG_DATA_HOME` when set and non-empty, else `$HOME/.local/share`.
@@ -544,6 +559,14 @@ mod tests {
             crate::sha256_hex(b"x")
         );
         assert!(verify(root, &none).is_err(), "nothing checked is a failure");
+    }
+
+    #[test]
+    fn a_release_lands_in_the_hub_folder_of_the_data_home() {
+        assert_eq!(
+            hub_dir(Path::new("/home/me/.local/share")),
+            PathBuf::from("/home/me/.local/share/zapret-hub")
+        );
     }
 
     #[test]
