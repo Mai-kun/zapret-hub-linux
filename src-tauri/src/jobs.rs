@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use router::RouterState;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager as _};
 use tauri_specta::Event as _;
 use tester::model::{Suite, TestRun};
 use tester::run::{Progress, Request};
@@ -12,6 +12,8 @@ use zapret::snapshot::{Snapshot, pending_path};
 
 use crate::actions::{self, state};
 use crate::dto::{LiveRun, NoticeLevel, TestProgress, TestsFinished};
+use crate::monitor;
+use crate::state::AppState;
 use crate::{notify, texts};
 
 /// Starts a run in its own thread; the page follows `TestProgress` and `TestsFinished`.
@@ -133,9 +135,12 @@ fn finish(app: &AppHandle, outcome: anyhow::Result<TestRun>) {
 
 const QUICK_EVERY: Duration = Duration::from_secs(30 * 60);
 
-/// Called once from `setup`: the start, then a quick check every 30 minutes (spec 5.6, 9.3).
+/// Called once from `setup`: the exclusions watch, the start, then a quick check every
+/// 30 minutes (spec 5.6, 9.3).
 pub fn start(app: &AppHandle) {
     let app = app.clone();
+    let _monitor_wake =
+        monitor::start_monitor(app.clone(), &*app.state::<AppState>());
     std::thread::spawn(move || {
         startup(&app);
         loop {

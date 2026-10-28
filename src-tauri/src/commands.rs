@@ -19,9 +19,8 @@ use zapret::service::QuickCheck;
 
 use crate::actions::{self, state as app};
 use crate::diag;
-use crate::dto::{
-    Candidates, Detected, DownloadProgress, Exclusions, FolderKind, LiveRun, Notice, Overview,
-};
+use crate::dto::{Candidates, Detected, DownloadProgress, FolderKind, LiveRun, Notice, Overview};
+use crate::exclusions::ExclusionRule;
 use crate::settings::Settings;
 use crate::state::AppState;
 use crate::{routing, texts, window};
@@ -453,23 +452,19 @@ pub async fn service_logs() -> Answer<String> {
     blocking(|| Ok(zapret::service::logs())).await
 }
 
-/// The exclusions card's contents: the exclude lists of zapret2 and the settings' ports.
+/// The exclusions card's contents: the named groups of `data/exclusions.toml`.
 #[tauri::command]
 #[specta::specta]
-pub async fn get_exclusions(handle: AppHandle) -> Answer<Exclusions> {
-    blocking(move || {
-        let state = app(&handle);
-        let engine = state.engine2_required()?;
-        Ok(actions::read_exclusions(&engine, &state.settings()))
-    })
-    .await
+pub async fn get_exclusion_rules(handle: AppHandle) -> Answer<Vec<ExclusionRule>> {
+    blocking(move || actions::read_exclusion_rules(&app(&handle))).await
 }
 
-/// The lists, the settings' ports, then the queue rewritten and the service restarted into it.
+/// The groups back onto `data/exclusions.toml`, the zapret2 lists and the settings' ports, then
+/// the nftables queue rewritten and the service restarted into it.
 #[tauri::command]
 #[specta::specta]
-pub async fn save_exclusions(handle: AppHandle, exclusions: Exclusions) -> Answer<()> {
-    blocking(move || actions::save_exclusions(&handle, exclusions)).await
+pub async fn save_exclusion_rules(handle: AppHandle, rules: Vec<ExclusionRule>) -> Answer<()> {
+    blocking(move || actions::save_exclusion_rules(&handle, rules)).await
 }
 
 #[tauri::command]

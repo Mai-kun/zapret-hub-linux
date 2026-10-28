@@ -6,6 +6,8 @@ mod cli;
 mod commands;
 mod diag;
 mod dto;
+mod exclusions;
+mod monitor;
 mod jobs;
 mod journal;
 mod notify;
@@ -86,8 +88,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::set_tg_ws_enabled,
             commands::save_tg_ws_config,
             commands::open_tg_proxy,
-            commands::get_exclusions,
-            commands::save_exclusions,
+            commands::get_exclusion_rules,
+            commands::save_exclusion_rules,
             commands::quick_check,
             commands::take_notices,
             commands::set_router_enabled,

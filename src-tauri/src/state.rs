@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use anyhow::Context as _;
@@ -73,6 +74,9 @@ pub struct AppState {
     notices: Mutex<Vec<Notice>>,
     /// How the newest run since the start ended: `tests_status` (CLI spec 7.1).
     last_outcome: Mutex<Option<::cli::Outcome>>,
+    /// Wakes the exclusions monitor: a save pokes it so the cgroup and the bypass sets catch up
+    /// at once instead of on the next tick.
+    pub(crate) monitor_wake: Mutex<Option<mpsc::Sender<()>>>,
     /// Routing through the SOCKS5 proxy: `routing` drives it.
     pub router: router::Router,
 }
@@ -94,6 +98,7 @@ impl AppState {
             ranking: Mutex::new(None),
             notices: Mutex::new(Vec::new()),
             last_outcome: Mutex::new(None),
+            monitor_wake: Mutex::new(None),
         }
     }
 
@@ -166,6 +171,10 @@ impl AppState {
 
     pub fn last_outcome(&self) -> Option<::cli::Outcome> {
         lock(&self.last_outcome).clone()
+    }
+
+    pub fn monitor_wake(&self) -> Option<mpsc::Sender<()>> {
+        lock(&self.monitor_wake).clone()
     }
 
     pub fn cancel_tests(&self) {

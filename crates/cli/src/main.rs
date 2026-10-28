@@ -319,11 +319,16 @@ enum ExclusionsCommand {
 }
 
 /// The lists the exclusions card edits.
+/// The group `exclusions add apps` / `remove apps` target: the one created by default in
+/// `data/exclusions.toml`.
+const DEFAULT_RULE_NAME: &str = "🛡️ Программы без zapret";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ExclusionList {
     Domains,
     Ips,
     Ports,
+    Apps,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -646,29 +651,21 @@ fn run(args: Cli, call: Call, note: Note) -> Result<Done, Fail> {
             preset: preset.into(),
         },
         Command::Routes(RoutesCommand::Flows { all }) => Request::RouteFlows { all },
-        Command::Exclusions(ExclusionsCommand::Show) => Request::GetExclusions,
+        Command::Exclusions(ExclusionsCommand::Show) => Request::GetExclusionRules,
         Command::Exclusions(ExclusionsCommand::Add { list, value }) => {
             let value = exclusion_value(list, &value)?;
-            let mut exclusions = call(Request::GetExclusions)?;
-            add_exclusion(&mut exclusions, list, &value)?;
-            Request::SaveExclusions { exclusions }
+            let mut rules = call(Request::GetExclusionRules)?;
+            add_exclusion_rule(&mut rules, list, &value)?;
+            Request::SaveExclusionRules { rules }
         }
         Command::Exclusions(ExclusionsCommand::Remove { list, value }) => {
             let value = exclusion_value(list, &value)?;
-            let mut exclusions = call(Request::GetExclusions)?;
-            remove_exclusion(&mut exclusions, list, &value)?;
-            Request::SaveExclusions { exclusions }
+            let mut rules = call(Request::GetExclusionRules)?;
+            remove_exclusion_rule(&mut rules, list, &value)?;
+            Request::SaveExclusionRules { rules }
         }
         Command::Exclusions(ExclusionsCommand::Reset) => {
-            let mut exclusions = call(Request::GetExclusions)?;
-            let object = exclusions.as_object_mut().ok_or_else(|| {
-                Fail::new(UNAVAILABLE, "Zapret Hub sent exclusions that are not an object")
-            })?;
-            let empty = || Value::Array(Vec::new());
-            for list in ["domains", "ips", "ports"] {
-                object.insert(list.to_owned(), empty());
-            }
-            Request::SaveExclusions { exclusions }
+            Request::SaveExclusionRules { rules: json!([default_rule_value()]) }
         }
         Command::TgWs(TgWsCommand::Status) => Request::TgWsStatus,
         Command::TgWs(TgWsCommand::Install) => Request::InstallTgWs,
@@ -775,6 +772,10 @@ fn is_port_entry(value: &str) -> bool {
     matches!((a.parse::<u16>(), b.parse::<u16>()), (Ok(a), Ok(b)) if a >= 1 && a <= b)
 }
 
+fn is_app_entry(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// An entry of one of the lists, checked before anything is sent (spec 7.2).
 fn exclusion_value(list: ExclusionList, value: &str) -> Result<String, Fail> {
     let name = list_name(list);
@@ -791,21 +792,23 @@ fn exclusion_value(list: ExclusionList, value: &str) -> Result<String, Fail> {
         ExclusionList::Domains => is_domain(value),
         ExclusionList::Ips => is_ip_entry(value),
         ExclusionList::Ports => is_port_entry(value),
+        ExclusionList::Apps => is_app_entry(value),
     };
     if !ok {
         return Err(match list {
             ExclusionList::Domains => bad("a domain"),
             ExclusionList::Ips => bad("an IPv4 address or subnet (a.b.c.d/n)"),
             ExclusionList::Ports => bad("a port or a port range (6881-6889)"),
+            ExclusionList::Apps => bad("a valid app name (alphanumeric, dashes, underscores)"),
         });
     }
     Ok(value.to_owned())
 }
 
-/// The lists arrive as `{ "domains": […], "ips": […], "ports": […] }`; `&str` indexing on a
-/// non-object `Value` would panic, so the shape is trusted only through `as_array`.
-fn entries(exclusions: &Value, name: &str) -> Result<Vec<String>, Fail> {
-    exclusions[name]
+/// The default rule's entry `list` (`domains`, `ips`, `ports` or `apps`).
+fn rule_entries(rule: &Value, list: ExclusionList) -> Result<Vec<String>, Fail> {
+    let name = list_name(list);
+    rule[name.as_str()]
         .as_array()
         .map(|taken| {
             taken
@@ -813,23 +816,61 @@ fn entries(exclusions: &Value, name: &str) -> Result<Vec<String>, Fail> {
                 .filter_map(|taken| taken.as_str().map(str::to_owned))
                 .collect()
         })
-        .ok_or_else(|| Fail::new(UNAVAILABLE, "Zapret Hub sent exclusions of another shape"))
+        .ok_or_else(|| {
+            Fail::new(
+                UNAVAILABLE,
+                format!("the «{DEFAULT_RULE_NAME}» group has no {name} entries"),
+            )
+        })
 }
 
-fn add_exclusion(exclusions: &mut Value, list: ExclusionList, value: &str) -> Result<(), Fail> {
+/// The group `exclusions add`/`remove` target: `«{DEFAULT_RULE_NAME}»`, created when missing.
+fn default_group(rules: &mut Value) -> &mut Value {
+    let array = rules
+        .as_array_mut()
+        .expect("exclusions are an array of groups");
+    if let Some(position) = array
+        .iter()
+        .position(|rule| rule["name"].as_str() == Some(DEFAULT_RULE_NAME))
+    {
+        return &mut array[position];
+    }
+    array.push(default_rule_value());
+    array.last_mut().expect("just pushed the default group")
+}
+
+fn default_rule_value() -> Value {
+    json!({
+        "name": DEFAULT_RULE_NAME,
+        "enabled": true,
+        "domains": [],
+        "ips": [],
+        "ports": [],
+        "apps": ["opencode", "opencode-cli"],
+    })
+}
+
+fn add_exclusion_rule(rules: &mut Value, list: ExclusionList, value: &str) -> Result<(), Fail> {
     let name = list_name(list);
-    let mut taken: Vec<String> = entries(exclusions, &name)?;
+    let rule = default_group(rules);
+    let mut taken = rule_entries(rule, list)?;
     if taken.iter().any(|taken| taken.eq_ignore_ascii_case(value)) {
-        return Err(Fail::new(FAILED, format!("{value} is in {name} already")));
+        return Err(Fail::new(
+            FAILED,
+            format!(
+                "{value} is in {name} of the «{DEFAULT_RULE_NAME}» group already"
+            ),
+        ));
     }
     taken.push(value.to_owned());
-    exclusions[name.as_str()] = Value::Array(taken.into_iter().map(Value::from).collect());
+    rule[name] = Value::Array(taken.into_iter().map(Value::from).collect());
     Ok(())
 }
 
-fn remove_exclusion(exclusions: &mut Value, list: ExclusionList, value: &str) -> Result<(), Fail> {
+fn remove_exclusion_rule(rules: &mut Value, list: ExclusionList, value: &str) -> Result<(), Fail> {
     let name = list_name(list);
-    let taken: Vec<String> = entries(exclusions, &name)?;
+    let rule = default_group(rules);
+    let taken = rule_entries(rule, list)?;
     let left: Vec<String> = taken
         .iter()
         .filter(|taken| !taken.eq_ignore_ascii_case(value))
@@ -838,7 +879,7 @@ fn remove_exclusion(exclusions: &mut Value, list: ExclusionList, value: &str) ->
     if left.len() == taken.len() {
         return Err(Fail::new(FAILED, format!("{value} is not in {name}")));
     }
-    exclusions[name.as_str()] = Value::Array(left.into_iter().map(Value::from).collect());
+    rule[name] = Value::Array(left.into_iter().map(Value::from).collect());
     Ok(())
 }
 
@@ -1343,7 +1384,7 @@ mod tests {
                     target: "https://discord.com".into(),
                 },
             ),
-            (&["exclusions", "show"], Request::GetExclusions),
+            (&["exclusions", "show"], Request::GetExclusionRules),
             (&["tg-ws", "status"], Request::TgWsStatus),
             (&["tg-ws", "install"], Request::InstallTgWs),
             (&["tg-ws", "on"], Request::SetTgWsEnabled { enabled: true }),
@@ -1358,55 +1399,77 @@ mod tests {
     #[test]
     fn exclusions_edit_read_change_and_write_back() {
         let held = || {
-            Ok(json!({
+            Ok(json!([{
+                "name": "🛡️ Программы без zapret",
+                "enabled": true,
                 "domains": ["discord.com"],
                 "ips": ["203.0.113.0/24"],
                 "ports": ["51413"],
-            }))
+                "apps": ["opencode"],
+            }]))
         };
+/// The group `«{DEFAULT_RULE_NAME}»` in a rules array, for the tests.
+fn default_rule_of<'a>(rules: &'a Value) -> &'a Value {
+    rules
+        .as_array()
+        .expect("exclusions are an array of groups")
+        .iter()
+        .find(|rule| rule["name"].as_str() == Some(DEFAULT_RULE_NAME))
+        .expect("the default group exists")
+}
+        // An app joins the default group.
+        let (_, asked) = drive(
+            &["exclusions", "add", "apps", "qbittorrent"],
+            vec![held(), Ok(Value::Null)],
+        );
+        let [Request::GetExclusionRules, Request::SaveExclusionRules { rules }] = asked.as_slice()
+        else {
+            panic!("{asked:?}")
+        };
+        assert_eq!(default_rule_of(rules)["apps"], json!(["opencode", "qbittorrent"]));
+        assert_eq!(default_rule_of(rules)["domains"], json!(["discord.com"]));
+        // The app already holds it: the CLI reads the groups and then says so, saving nothing.
+        let (outcome, asked) = drive(
+            &["exclusions", "add", "apps", "opencode"],
+            vec![held()],
+        );
+        assert_eq!(asked, [Request::GetExclusionRules]);
+        assert_eq!(code(outcome), FAILED);
+        // Removal matches an app without its case.
+        let (_, asked) = drive(
+            &["exclusions", "remove", "apps", "OPencode"],
+            vec![held(), Ok(Value::Null)],
+        );
+        let [Request::GetExclusionRules, Request::SaveExclusionRules { rules }] = asked.as_slice()
+        else {
+            panic!("{asked:?}")
+        };
+        assert_eq!(default_rule_of(rules)["apps"], json!([]));
+        // A domain joins the same group, and removal matches without its case.
         let (_, asked) = drive(
             &["exclusions", "add", "domains", "example.com"],
             vec![held(), Ok(Value::Null)],
         );
-        let [Request::GetExclusions, Request::SaveExclusions { exclusions }] = asked.as_slice()
+        let [Request::GetExclusionRules, Request::SaveExclusionRules { rules }] = asked.as_slice()
         else {
             panic!("{asked:?}")
         };
-        assert_eq!(exclusions["domains"], json!(["discord.com", "example.com"]));
-        assert_eq!(exclusions["ports"], json!(["51413"]));
-        // The app already holds it: the CLI reads the lists and then says so, saving nothing.
-        let (outcome, asked) = drive(
-            &["exclusions", "add", "ips", "203.0.113.0/24"],
-            vec![held()],
-        );
-        assert_eq!(asked, [Request::GetExclusions]);
-        assert_eq!(code(outcome), FAILED);
-        // Removal matches a domain without its case.
+        assert_eq!(default_rule_of(rules)["domains"], json!(["discord.com", "example.com"]));
         let (_, asked) = drive(
             &["exclusions", "remove", "domains", "DISCORD.com"],
             vec![held(), Ok(Value::Null)],
         );
-        let [Request::GetExclusions, Request::SaveExclusions { exclusions }] = asked.as_slice()
+        let [Request::GetExclusionRules, Request::SaveExclusionRules { rules }] = asked.as_slice()
         else {
             panic!("{asked:?}")
         };
-        assert_eq!(exclusions["domains"], json!([]));
-        let (outcome, asked) = drive(
-            &["exclusions", "remove", "ips", "203.0.113.0/24"],
-            vec![held(), Ok(Value::Null)],
-        );
-        assert_eq!(code(outcome), 0);
-        let [Request::GetExclusions, Request::SaveExclusions { exclusions }] = asked.as_slice()
-        else {
-            panic!("{asked:?}")
-        };
-        assert_eq!(exclusions["ips"], json!([]));
+        assert_eq!(default_rule_of(rules)["domains"], json!([]));
         // Removing anything else fails after only the read.
         let (outcome, asked) = drive(
             &["exclusions", "remove", "domains", "answer.com"],
             vec![held()],
         );
-        assert_eq!(asked, [Request::GetExclusions]);
+        assert_eq!(asked, [Request::GetExclusionRules]);
         assert_eq!(code(outcome), FAILED);
         // A value that is not of its list: refused before the app is asked.
         for (list, value) in [
@@ -1417,21 +1480,32 @@ mod tests {
             ("ports", "0"),
             ("ports", "0-65535"),
             ("ports", "5000-4000"),
+            ("apps", "bad#name"),
         ] {
             let (outcome, asked) = drive(&["exclusions", "add", list, value], Vec::new());
             assert!(asked.is_empty(), "{list} {value}");
             assert_eq!(code(outcome), USAGE, "{list} {value}");
         }
-        // Reset empties the three lists and keeps the shape.
+        // Reset brings back the single default group with its default apps, without a read first.
         let (_, asked) = drive(
             &["exclusions", "reset", "--yes"],
-            vec![held(), Ok(Value::Null)],
+            Vec::new(),
         );
-        let [Request::GetExclusions, Request::SaveExclusions { exclusions }] = asked.as_slice()
+        let [Request::SaveExclusionRules { rules }] = asked.as_slice()
         else {
             panic!("{asked:?}")
         };
-        assert_eq!(exclusions, &json!({"domains": [], "ips": [], "ports": []}));
+        assert_eq!(
+            rules,
+            &json!([{
+                "name": "🛡️ Программы без zapret",
+                "enabled": true,
+                "domains": [],
+                "ips": [],
+                "ports": [],
+                "apps": ["opencode", "opencode-cli"],
+            }])
+        );
     }
 
     #[test]

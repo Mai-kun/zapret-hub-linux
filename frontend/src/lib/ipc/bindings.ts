@@ -88,10 +88,13 @@ export const commands = {
 	setTgWsEnabled: (enabled: boolean) => typedError<TgWsStatus, string>(__TAURI_INVOKE("set_tg_ws_enabled", { enabled })),
 	saveTgWsConfig: (port: number, secret: string, args: string) => typedError<TgWsStatus, string>(__TAURI_INVOKE("save_tg_ws_config", { port, secret, args })),
 	openTgProxy: () => typedError<null, string>(__TAURI_INVOKE("open_tg_proxy")),
-	/**  The exclusions card's contents: the exclude lists of zapret2 and the settings' ports. */
-	getExclusions: () => typedError<Exclusions, string>(__TAURI_INVOKE("get_exclusions")),
-	/**  The lists, the settings' ports, then the queue rewritten and the service restarted into it. */
-	saveExclusions: (exclusions: Exclusions) => typedError<null, string>(__TAURI_INVOKE("save_exclusions", { exclusions })),
+	/**  The exclusions card's contents: the named groups of `data/exclusions.toml`. */
+	getExclusionRules: () => typedError<ExclusionRule[], string>(__TAURI_INVOKE("get_exclusion_rules")),
+	/**
+	 *  The groups back onto `data/exclusions.toml`, the zapret2 lists and the settings' ports, then
+	 *  the nftables queue rewritten and the service restarted into it.
+	 */
+	saveExclusionRules: (rules: ExclusionRule[]) => typedError<null, string>(__TAURI_INVOKE("save_exclusion_rules", { rules })),
 	quickCheck: () => typedError<QuickCheck, string>(__TAURI_INVOKE("quick_check")),
 	takeNotices: () => __TAURI_INVOKE<Notice[]>("take_notices"),
 	/**  The only command that writes `router_enabled` (`routing::set_enabled`). */
@@ -344,14 +347,14 @@ export type EngineDiag = {
 	cap_net_raw: boolean,
 };
 
-/**
- *  What the «Исключения из zapret» card edits: the two exclude lists of zapret2 (one entry per
- *  line) and the ports that leave the nfqueue.
- */
-export type Exclusions = {
+/**  One named group of exclusions. */
+export type ExclusionRule = {
+	name: string,
+	enabled: boolean,
 	domains: string[],
 	ips: string[],
 	ports: string[],
+	apps?: string[],
 };
 
 export type FieldError = {

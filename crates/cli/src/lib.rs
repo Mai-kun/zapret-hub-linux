@@ -108,11 +108,11 @@ pub enum Request {
     NftRules,
     /// The system's DNS cache flushed.
     FlushDns,
-    /// The exclusions card's contents: the two exclude lists and the nftables-excluded ports.
-    GetExclusions,
-    /// `exclusions` as the app's `Exclusions` JSON: the type lives in the app, which checks it.
-    SaveExclusions {
-        exclusions: Value,
+    /// The exclusions card's contents: the named groups of `data/exclusions.toml`.
+    GetExclusionRules,
+    /// The groups as JSON: the app parses them into its `ExclusionRule` type.
+    SaveExclusionRules {
+        rules: Value,
     },
     /// The TG WS Proxy service: the disk, systemd and the settings in one go.
     TgWsStatus,
@@ -358,9 +358,16 @@ mod tests {
             Request::ServiceLogs,
             Request::NftRules,
             Request::FlushDns,
-            Request::GetExclusions,
-            Request::SaveExclusions {
-                exclusions: json!({ "domains": [], "ips": [], "ports": [] }),
+            Request::GetExclusionRules,
+            Request::SaveExclusionRules {
+                rules: json!([{
+                    "name": "🛡️ Программы без zapret",
+                    "enabled": true,
+                    "domains": [],
+                    "ips": [],
+                    "ports": [],
+                    "apps": ["opencode", "opencode-cli"],
+                }]),
             },
             Request::TgWsStatus,
             Request::InstallTgWs,

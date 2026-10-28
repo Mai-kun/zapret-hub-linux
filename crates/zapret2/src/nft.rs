@@ -21,6 +21,10 @@ const FWMARK: &str = "0x40000000";
 /// leaves the queue alone. `nft` names a group of `/etc/group`, so it has to exist.
 pub const GROUP: &str = "zapret-bypass";
 
+/// The cgroup v2 whose processes' sockets leave the queue whole: `socket cgroupv2 level 1`
+/// matches them, and the monitor writes matching PIDs into its `cgroup.procs`.
+pub const CGROUP: &str = "/sys/fs/cgroup/zapret_bypass";
+
 /// The table file the `zapret2` service's `ExecStartPre` applies and `ExecStopPost` deletes.
 pub const CONFIG: &str = "/etc/zapret-hub/nfqws2.nft";
 
@@ -57,14 +61,28 @@ pub fn translate(tail: &str) -> (String, String, String) {
 /// builds the queue's rules again for the `mark`-kept packets to pass, the matched ones entering
 /// queue 200 while the connection is young. Loopback stays out: queued loopback packets stall
 /// local connections, and no DPI lives there.
-pub fn table(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> String {
+///
+/// `with_cgroupv2` adds `socket cgroupv2 level 1 "zapret_bypass" return`: the sockets of the
+/// processes the monitor put into `/sys/fs/cgroup/zapret_bypass` leave the queue on the very
+/// first SYN. Kernels without `socket cgroupv2` in nft call it a syntax error, so `apply` retries
+/// without it instead of failing.
+pub fn table(tcp_ports: &str, udp_ports: &str, excluded_ports: &str, with_cgroupv2: bool) -> String {
     // Before the queue rules: the group and the excluded ports go through untouched, and only
     // the rest of the traffic reaches the queue.
     let mut rules = format!("        meta skgid {GROUP} return\n");
+    if with_cgroupv2 {
+        rules.push_str("        socket cgroupv2 level 1 \"zapret_bypass\" return\n");
+    }
+    
     if !excluded_ports.is_empty() {
         rules.push_str(&format!("        th dport {{ {excluded_ports} }} return\n"));
         rules.push_str(&format!("        th sport {{ {excluded_ports} }} return\n"));
     }
+    
+    // Dynamic sets
+    rules.push_str("        tcp sport @bypass_tcp_ports return\n");
+    rules.push_str("        udp sport @bypass_udp_ports return\n");
+
     if !tcp_ports.is_empty() {
         rules.push_str(&format!(
             "        tcp dport {{ {tcp_ports} }} ct original packets 1-12 counter queue num {QNUM} bypass\n"
@@ -79,6 +97,8 @@ pub fn table(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> String {
         "table inet zapret_hub\n\
          delete table inet zapret_hub\n\
          table inet zapret_hub {{\n\
+         \x20   set bypass_tcp_ports {{ type inet_service; flags interval; }}\n\
+         \x20   set bypass_udp_ports {{ type inet_service; flags interval; }}\n\
          \x20   chain output {{\n\
          \x20       type filter hook output priority mangle; policy accept;\n\
          \x20       meta mark & {FWMARK} != 0 return\n\
@@ -115,23 +135,46 @@ fn ensure_group() {
     }
 }
 
+/// Makes `/sys/fs/cgroup/zapret_bypass` exist so `meta skgid zapret-bypass` and
+/// `socket cgroupv2 level 1 "zapret_bypass"` can match the processes the monitor moves there.
+pub fn ensure_cgroup() {
+    if let Err(err) = zapret::root::run("mkdir", &["-p", CGROUP]) {
+        log::warn!("cannot create {CGROUP}: {err:#}");
+    }
+}
+
 /// Writes the table to {CONFIG} under root: the service can apply it at every start.
 pub fn write_config(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> anyhow::Result<()> {
-    let text = table(tcp_ports, udp_ports, excluded_ports);
+    ensure_cgroup();
+    let text = table(tcp_ports, udp_ports, excluded_ports, true);
     ensure_group();
     zapret::root::write(std::path::Path::new(CONFIG), &text)
 }
 
 /// Applies the table now (the tests run `nfqws2` without a service): the file is a temp one,
-/// `nft -f` reads and keeps it.
+/// `nft -f` reads and keeps it. `socket cgroupv2` is tried first; on a kernel or an `nft` that
+/// does not know it, `nft -f` is retried without the bypass rule instead of failing.
 pub fn apply(tcp_ports: &str, udp_ports: &str, excluded_ports: &str) -> anyhow::Result<()> {
-    let text = table(tcp_ports, udp_ports, excluded_ports);
+    ensure_cgroup();
     ensure_group();
+    let text = table(tcp_ports, udp_ports, excluded_ports, true);
+    let applied = apply_text(&text);
+    if applied.is_err() {
+        // Older kernel/nft: `socket cgroupv2` is a syntax error. The cgroup itself still works
+        // through the port sets, so retry without the rule and keep the table alive.
+        let text = table(tcp_ports, udp_ports, excluded_ports, false);
+        return apply_text(&text);
+    }
+    applied
+}
+
+/// Applies one rendered table text through `nft -f`.
+fn apply_text(text: &str) -> anyhow::Result<()> {
     let file = std::env::temp_dir().join(format!("zapret-hub-nft-{}", std::process::id()));
     std::fs::write(&file, text)?;
-    let applied = zapret::root::run("nft", &["-f", file.display().to_string().as_str()]);
+    let applied = zapret::root::run("nft", &["-f", file.display().to_string().as_str()])?;
     let _ = std::fs::remove_file(&file);
-    applied?.check()?;
+    applied.check()?;
     Ok(())
 }
 
@@ -221,7 +264,7 @@ mod tests {
 
     #[test]
     fn the_table_matches_the_readme_shape() {
-        let text = table("443,80", "443", "51413, 6881-6889");
+        let text = table("443,80", "443", "51413, 6881-6889", true);
         for part in [
             "table inet zapret_hub",
             "delete table inet zapret_hub",
@@ -241,9 +284,13 @@ mod tests {
         let skgid = text.find("meta skgid").unwrap();
         let queue = text.find("queue num").unwrap();
         assert!(skgid < queue);
-        let empty = table("", "", "");
+        let empty = table("", "", "", false);
         assert!(empty.contains("policy accept;") && !empty.contains("queue num"));
         assert!(empty.contains("meta skgid") && !empty.contains("th dport"));
+        // A kernel without `socket cgroupv2` gets the table without the bypass rule.
+        let without = table("443,80", "443", "", false);
+        assert!(!without.contains("socket cgroupv2"));
+        assert!(without.contains("meta skgid zapret-bypass return"));
     }
 
     #[test]

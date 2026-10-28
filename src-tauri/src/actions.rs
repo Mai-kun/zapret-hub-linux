@@ -4,15 +4,12 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Context as _;
 use tauri::{AppHandle, Manager as _};
 use tauri_specta::Event as _;
 use zapret::service::{QuickCheck, SvcState, active};
 
-use crate::dto::{
-    Candidates, Detected, Exclusions, FolderKind, Notice, NoticeLevel, NoticesChanged, Overview,
-    StateChanged,
-};
+use crate::dto::{Candidates, Detected, FolderKind, Notice, NoticeLevel, NoticesChanged, Overview, StateChanged};
+use crate::exclusions::{self, ExclusionRule};
 use crate::settings::Settings;
 use crate::state::AppState;
 
@@ -339,111 +336,68 @@ pub fn open_folder(app: &AppHandle, kind: FolderKind) -> anyhow::Result<()> {
     crate::shell::open(path.as_os_str())
 }
 
-/// The two exclude lists of zapret2 the exclusions card edits, next to the engine's other lists.
-const EXCLUDE_DOMAINS: &str = "list-exclude-user.txt";
-const EXCLUDE_IPS: &str = "ipset-exclude-user.txt";
-
-/// Popular Russian services whose grade of desync of the strategies breaks (defaults the card
-/// shows while the file is empty).
-const DEFAULT_EXCLUDE_DOMAINS: [&str; 15] = [
-    "gosuslugi.ru",
-    "sberbank.ru",
-    "tbank.ru",
-    "tinkoff.ru",
-    "vtb.ru",
-    "alfabank.ru",
-    "avito.ru",
-    "ozon.ru",
-    "wildberries.ru",
-    "kinopoisk.ru",
-    "yandex.ru",
-    "ya.ru",
-    "vk.com",
-    "mail.ru",
-    "rutube.ru",
-];
-
-/// The local networks: nothing at home behind the strategies.
-const DEFAULT_EXCLUDE_IPS: [&str; 4] = [
-    "192.168.0.0/16",
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "127.0.0.0/8",
-];
-
-/// One entry per line, blanks dropped; an empty (or missing) file reads the defaults. An entry
-/// starting with `#! ` is one the exclusions card switched off: it comes back as its entry, so
-/// the card can show and restore it (the engine itself reads `#` comments out).
-fn read_list(path: &Path, defaults: &[&str]) -> Vec<String> {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
-    let lines = text
-        .lines()
-        .map(|line| line.trim().strip_prefix("#! ").unwrap_or(line.trim()))
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if lines.is_empty() {
-        defaults.iter().map(|line| line.to_string()).collect()
-    } else {
-        lines
-    }
+/// The exclusions card's contents: the named groups of `data/exclusions.toml`.
+pub fn read_exclusion_rules(state: &AppState) -> anyhow::Result<Vec<ExclusionRule>> {
+    Ok(exclusions::ExclusionRules::load(&state.paths)?.rules)
 }
 
-/// The card's contents: the two lists and the settings' ports.
-pub fn read_exclusions(engine: &zapret2::Engine, settings: &Settings) -> Exclusions {
-    let lists = zapret2::strategies::lists_dir(engine);
-    Exclusions {
-        domains: read_list(&lists.join(EXCLUDE_DOMAINS), &DEFAULT_EXCLUDE_DOMAINS),
-        ips: read_list(&lists.join(EXCLUDE_IPS), &DEFAULT_EXCLUDE_IPS),
-        ports: settings.excluded_ports.clone(),
-    }
-}
-
-/// The card's save: the lists back onto the disk, the ports into the settings file, then the
-/// nftables queue rewritten and the running service put into the new rules.
-pub fn save_exclusions(app: &AppHandle, exclusions: Exclusions) -> anyhow::Result<()> {
+/// The groups back onto `data/exclusions.toml`; the enabled groups' domains, IPs and apps into
+/// the flat exclude lists of zapret2, and the ports into the settings file; then the nftables
+/// queue rewritten and the running service put into the new rules. The monitor wakes up right
+/// after, so the cgroup and the bypass sets catch up without waiting for the next tick.
+pub fn save_exclusion_rules(app: &AppHandle, rules: Vec<ExclusionRule>) -> anyhow::Result<()> {
     let state = state(app);
-    let engine = state.engine2_required()?;
-    let lists = zapret2::strategies::lists_dir(&engine);
-    std::fs::create_dir_all(&lists)
-        .with_context(|| format!("cannot create {}", lists.display()))?;
-    for (name, lines) in [
-        (EXCLUDE_DOMAINS, &exclusions.domains),
-        (EXCLUDE_IPS, &exclusions.ips),
-    ] {
-        std::fs::write(lists.join(name), lines.join("\n") + "\n")
-            .with_context(|| format!("cannot write {}", lists.join(name).display()))?;
+    let _saving = state.saving();
+    let saved = exclusions::ExclusionRules {
+        path: state.paths.data().join(exclusions::FILE_NAME),
+        rules,
+    };
+    saved.save()?;
+    // The flat lists the engine reads at start: derived from the enabled groups.
+    if let Ok(Some(engine)) = state.engine2() {
+        let lists = zapret2::strategies::lists_dir(&engine);
+        exclusions::write_derived_lists(&lists, &saved)?;
     }
     // The ports live in the settings file: one save at a time, like a whole settings save.
-    let _saving = state.saving();
     let mut settings = state.settings();
-    if settings.excluded_ports != exclusions.ports {
-        settings.excluded_ports = exclusions.ports.clone();
+    let ports = saved.enabled_ports();
+    if settings.excluded_ports != ports {
+        settings.excluded_ports = ports;
         crate::settings::save(&state.paths.settings(), &settings)?;
         state.set_settings(settings);
     }
     drop(_saving);
-    refresh_queue(app, &engine)?;
+    refresh_queue(app)?;
+    // The monitor picks the change up within its next tick; this makes it immediate.
+    if let Some(wake) = state.monitor_wake() {
+        let _ = wake.send(());
+    }
     changed(app);
     Ok(())
 }
 
 /// The active strategy's nftables queue, rewritten with the excluded ports in force, and the
-/// running service restarted into it — the lists the engine re-read at the same start. No active
-/// strategy: the next «Применить» bakes the settings in.
-fn refresh_queue(app: &AppHandle, engine: &zapret2::Engine) -> anyhow::Result<()> {
+/// running service restarted into it. No active strategy: the next «Применить» bakes the
+/// settings in.
+fn refresh_queue(app: &AppHandle) -> anyhow::Result<()> {
     let state = state(app);
     let Some(short) = zapret::service::strategy()
         .and_then(|name| zapret2::strip_prefix(&name).map(str::to_owned))
     else {
         return Ok(());
     };
+    let Ok(Some(engine)) = state.engine2() else {
+        return Ok(());
+    };
     let excluded = state.settings().excluded_ports.join(", ");
     state.change(|| {
         if engine.is_nfqws() {
             let strategy = zapret2::strategies::find(engine.root(), &short)?;
-            let tail =
-                zapret2::strategies::tail(engine, &strategy.text, state.settings().game_filter)?;
+            let tail = zapret2::strategies::tail(
+                &engine,
+                &strategy.text,
+                state.settings().game_filter,
+            )?;
             let (_, tcp, udp) = zapret2::nft::translate(&tail);
             zapret2::nft::write_config(&tcp, &udp, &excluded)?;
         }

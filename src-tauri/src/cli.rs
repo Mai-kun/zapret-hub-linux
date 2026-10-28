@@ -143,11 +143,11 @@ fn dispatch(app: &AppHandle, request: Request) -> Result<Value, String> {
         Request::ServiceLogs => json(block_on(commands::service_logs())?),
         Request::NftRules => json(block_on(commands::nft_rules())?),
         Request::FlushDns => json(block_on(commands::flush_dns())?),
-        Request::GetExclusions => json(block_on(commands::get_exclusions(handle))?),
-        Request::SaveExclusions { exclusions } => {
-            let exclusions = serde_json::from_value(exclusions)
+        Request::GetExclusionRules => json(block_on(commands::get_exclusion_rules(handle))?),
+        Request::SaveExclusionRules { rules } => {
+            let rules = serde_json::from_value(rules)
                 .map_err(|err| format!("the exclusions do not parse: {err}"))?;
-            json(block_on(commands::save_exclusions(handle, exclusions))?)
+            json(block_on(commands::save_exclusion_rules(handle, rules))?)
         }
         Request::TgWsStatus => json(block_on(commands::tg_ws_status(handle))?),
         Request::InstallTgWs => json(block_on(commands::install_tg_ws(handle))?),

@@ -1,12 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { commands, type Exclusions, type FlowRow, type Preset, type RouterState, type RouterStatus, type RoutesView, type Rule } from "$lib/ipc/bindings";
+  import { commands, type ExclusionRule, type FlowRow, type Preset, type RouterState, type RouterStatus, type RoutesView, type Rule } from "$lib/ipc/bindings";
   import { app, change } from "$lib/app.svelte";
   import { call } from "$lib/api";
   import { confirmation } from "$lib/confirm.svelte";
   import { notices } from "$lib/notices.svelte";
   import { bytes, programName, proxyLabel, routeSummary, trafficLabel, viaLabel } from "$lib/format";
-  import { S } from "$lib/strings";
+  import { plural, S } from "$lib/strings";
   import RouteEditor from "./RouteEditor.svelte";
 
   let status = $state<RouterStatus | null>(null);
@@ -15,14 +15,28 @@
   let all = $state(false);
   let editing = $state<{ rule: Rule; create: boolean } | null>(null);
 
-  // The «Исключения из zapret» groups: content on load + which group is switched off. A switched
-  // off group is stored as `#! entry` lines (the app reads those back), so nothing is lost.
-  type ExclKind = "domains" | "ips" | "ports";
-  const OFF_KEY = "zapret-hub-exclusions-off";
-  let exclusions = $state<Exclusions | null>(null);
-  let off = $state<Record<ExclKind, boolean>>({ domains: false, ips: false, ports: false });
-  let editingExclusion = $state<{ target: ExclKind; draft: string } | null>(null);
+  // The «Исключения из zapret» groups: named groups from `data/exclusions.toml`, loaded once on
+  // open. One group is being edited at a time in the editor below.
+  let exclusions = $state<ExclusionRule[] | null>(null);
+  let editingExclusion = $state<{
+    index: number | null;
+    name: string;
+    enabled: boolean;
+    domains: string;
+    ips: string;
+    apps: string;
+    ports: string;
+  } | null>(null);
   let exclusionsSaved = $state(false);
+
+  const blankRule = (): ExclusionRule => ({
+    name: "",
+    enabled: true,
+    domains: [],
+    ips: [],
+    ports: [],
+    apps: [],
+  });
 
   const on = $derived(status !== null && status.state.state !== "Off");
   const error = $derived(view?.error ?? status?.rules_error ?? null);
@@ -48,12 +62,8 @@
   }
 
   onMount(() => {
-    void call(S.failed.routes, commands.getExclusions()).then((read) => {
+    void call(S.failed.exclusions, commands.getExclusionRules()).then((read) => {
       if (!read) return;
-      // A switch off of an earlier session comes back from the local store: the file only knows
-      // the (still kept) `#!` entries.
-      const remembered = localStorage.getItem(OFF_KEY);
-      if (remembered) off = { ...off, ...JSON.parse(remembered) };
       exclusions = read;
     });
 
@@ -135,21 +145,9 @@
 
   const draftPorts = (text: string): string[] => text.split(/[\s,]+/).filter(Boolean);
 
-  /** A short look at the group: the first five entries, then «…». */
-  const preview = (list: string[] | undefined): string =>
-    list === undefined || list.length === 0 ? "—" : list.slice(0, 5).join(", ") + (list.length > 5 ? "…" : "");
-
-  /** The save itself, with the switched off groups marked `#!` (ports go out as an empty list). */
-  async function saveExclusions(next: Exclusions): Promise<boolean> {
-    const marked = (entries: string[], disabled: boolean): string[] =>
-      disabled ? entries.map((entry) => `#! ${entry}`) : entries;
-    const answer = await change(S.failed.exclusions, () =>
-      commands.saveExclusions({
-        domains: marked(next.domains, off.domains),
-        ips: marked(next.ips, off.ips),
-        ports: off.ports ? [] : next.ports,
-      }),
-    );
+  /** The save itself. */
+  async function saveExclusions(next: ExclusionRule[]): Promise<boolean> {
+    const answer = await change(S.failed.exclusions, () => commands.saveExclusionRules(next));
     if (answer === undefined) return false;
     exclusions = next;
     exclusionsSaved = true;
@@ -157,30 +155,69 @@
     return true;
   }
 
-  async function toggleExclusion(kind: ExclKind): Promise<void> {
-    off = { ...off, [kind]: !off[kind] };
-    localStorage.setItem(OFF_KEY, JSON.stringify(off));
-    if (exclusions) void saveExclusions({ ...exclusions });
+  async function toggleRule(index: number): Promise<void> {
+    if (!exclusions) return;
+    const next = exclusions.slice();
+    next[index]!.enabled = !next[index]!.enabled;
+    await saveExclusions(next);
   }
 
-  /** The editor open for an existing group: its entries as they are kept. */
-  function editExclusion(kind: ExclKind): void {
+  async function removeRule(index: number): Promise<void> {
     if (!exclusions) return;
+    const rule = exclusions[index]!;
+    const sure = await confirmation.ask({
+      title: `Удалить группу «${rule.name}»?`,
+      text: "Группа исключений будет удалена.",
+      yes: S.routes.delete,
+    });
+    if (!sure) return;
+    const next = exclusions.slice();
+    next.splice(index, 1);
+    await saveExclusions(next);
+    if (editingExclusion?.index === index) editingExclusion = null;
+  }
+
+  /** The editor open for an existing group, or a blank one for a new group. */
+  function editExclusion(index: number | null): void {
+    if (!exclusions) return;
+    const rule = index === null ? blankRule() : exclusions[index]!;
     editingExclusion = {
-      target: kind,
-      draft: kind === "ports" ? exclusions.ports.join(", ") : exclusions[kind].join("\n"),
+      index,
+      name: rule.name,
+      enabled: rule.enabled,
+      domains: rule.domains.join("\n"),
+      ips: rule.ips.join("\n"),
+      apps: (rule.apps ?? []).join("\n"),
+      ports: rule.ports.join(", "),
     };
   }
 
   async function saveEditing(): Promise<void> {
     if (!exclusions || !editingExclusion) return;
-    const { target, draft } = editingExclusion;
-    const entryLists: Exclusions = {
-      ...exclusions,
-      [target]: target === "ports" ? draftPorts(draft) : draftLines(draft),
+    const { index, name, enabled, domains, ips, apps, ports } = editingExclusion;
+    const rule: ExclusionRule = {
+      name: name.trim(),
+      enabled,
+      domains: draftLines(domains),
+      ips: draftLines(ips),
+      ports: draftPorts(ports),
+      apps: draftLines(apps),
     };
-    if (await saveExclusions(entryLists)) editingExclusion = null;
+    const next = exclusions.slice();
+    if (index === null) next.push(rule);
+    else next[index] = rule;
+    if (await saveExclusions(next)) editingExclusion = null;
   }
+
+  /** A short look at a rule: how many entries each target has. */
+  const ruleSummary = (rule: ExclusionRule): string => {
+    const parts: string[] = [];
+    if (rule.domains.length > 0) parts.push(`${rule.domains.length} ${plural(rule.domains.length, ["домен", "домена", "доменов"])}`);
+    if (rule.ips.length > 0) parts.push(`${rule.ips.length} ${plural(rule.ips.length, ["подсеть", "подсети", "подсетей"])}`);
+    if ((rule.apps ?? []).length > 0) parts.push(`${(rule.apps ?? []).length} ${plural((rule.apps ?? []).length, ["программа", "программы", "программ"])}`);
+    if (rule.ports.length > 0) parts.push(`${rule.ports.length} ${plural(rule.ports.length, ["порт", "порта", "портов"])}`);
+    return parts.length > 0 ? parts.join(" · ") : "—";
+  };
 </script>
 
 {#if status}
@@ -275,23 +312,58 @@
     {#if editingExclusion}
       <div class="excl-editor">
         <div class="row">
-          <strong>{editingExclusion.target === "domains" ? S.routes.exclusions.groups.domainsRu : editingExclusion.target === "ips" ? S.routes.exclusions.groups.local : S.routes.exclusions.groups.p2p}</strong>
+          <label for="excl-name">{S.routes.exclusions.name}</label>
+          <input id="excl-name" bind:value={editingExclusion.name} />
+          <label class="inline"
+            ><input type="checkbox" bind:checked={editingExclusion.enabled} />
+            {S.routes.exclusions.enabled}</label
+          >
         </div>
-        <p class="muted">{S.routes.exclusions.hints[editingExclusion.target]}</p>
-        {#if editingExclusion.target === "ports"}
-          <input
-            bind:value={editingExclusion.draft}
-            placeholder={S.routes.exclusions.portPlaceholder}
-            aria-label={S.routes.exclusions.targets.ports}
-          />
-        {:else}
-          <textarea
-            rows="5"
-            spellcheck="false"
-            bind:value={editingExclusion.draft}
-            aria-label={S.routes.exclusions.targets[editingExclusion.target]}
-          ></textarea>
-        {/if}
+        <div class="cols">
+          <div>
+            <div class="field-header">
+              <label for="excl-domains">{S.routes.exclusions.targets.domains}</label>
+              <span class="muted hint">{S.routes.exclusions.hints.domains}</span>
+            </div>
+            <textarea
+              id="excl-domains"
+              rows="4"
+              spellcheck="false"
+              bind:value={editingExclusion.domains}
+            ></textarea>
+          </div>
+          <div>
+            <div class="field-header">
+              <label for="excl-ips">{S.routes.exclusions.targets.ips}</label>
+              <span class="muted hint">{S.routes.exclusions.hints.ips}</span>
+            </div>
+            <textarea id="excl-ips" rows="4" spellcheck="false" bind:value={editingExclusion.ips}></textarea>
+          </div>
+          <div>
+            <div class="field-header">
+              <label for="excl-apps">{S.routes.exclusions.targets.apps}</label>
+              <span class="muted hint">{S.routes.exclusions.hints.apps}</span>
+            </div>
+            <textarea
+              id="excl-apps"
+              rows="4"
+              spellcheck="false"
+              bind:value={editingExclusion.apps}
+            ></textarea>
+          </div>
+          <div>
+            <div class="field-header">
+              <label for="excl-ports">{S.routes.exclusions.targets.ports}</label>
+              <span class="muted hint">{S.routes.exclusions.hints.ports}</span>
+            </div>
+            <input
+              id="excl-ports"
+              bind:value={editingExclusion.ports}
+              placeholder={S.routes.exclusions.portPlaceholder}
+              aria-label={S.routes.exclusions.targets.ports}
+            />
+          </div>
+        </div>
         <div class="buttons">
           <button class="primary" disabled={app.busy} onclick={saveEditing}>{S.routes.exclusions.save}</button>
           <button onclick={() => (editingExclusion = null)}>{S.common.close}</button>
@@ -299,55 +371,36 @@
         </div>
       </div>
     {:else}
-      <div class="groups">
-        <div class="group" class:muted={off.domains}>
-          <div class="row">
-            <label class="inline">
-              <input type="checkbox" checked={!off.domains} disabled={!exclusions || app.busy} onchange={() => toggleExclusion("domains")} />
-              <strong>{S.routes.exclusions.groups.domainsRu}</strong>
-            </label>
-            <span class="badge">{exclusions ? S.routes.exclusions.counts.domains(exclusions.domains.length) : "…"}</span>
-            <span class="grow"></span>
-            <button disabled={!exclusions || app.busy} onclick={() => editExclusion("domains")}>{S.routes.edit}</button>
-          </div>
-          <p class="muted">{preview(exclusions?.domains)}</p>
-        </div>
-        <div class="group" class:muted={off.ips}>
-          <div class="row">
-            <label class="inline">
-              <input type="checkbox" checked={!off.ips} disabled={!exclusions || app.busy} onchange={() => toggleExclusion("ips")} />
-              <strong>{S.routes.exclusions.groups.local}</strong>
-            </label>
-            <span class="badge">{exclusions ? S.routes.exclusions.counts.subnets(exclusions.ips.length) : "…"}</span>
-            <span class="grow"></span>
-            <button disabled={!exclusions || app.busy} onclick={() => editExclusion("ips")}>{S.routes.edit}</button>
-          </div>
-          <p class="muted">{preview(exclusions?.ips)}</p>
-        </div>
-        <div class="group" class:muted={off.ports}>
-          <div class="row">
-            <label class="inline">
-              <input type="checkbox" checked={!off.ports} disabled={!exclusions || app.busy} onchange={() => toggleExclusion("ports")} />
-              <strong>{S.routes.exclusions.groups.p2p}</strong>
-            </label>
-            <span class="badge">{exclusions ? (exclusions.ports.length === 0 ? S.routes.exclusions.noPorts : exclusions.ports.join(", ")) : "…"}</span>
-            <span class="grow"></span>
-            <button disabled={!exclusions || app.busy} onclick={() => editExclusion("ports")}>{S.routes.edit}</button>
-          </div>
-        </div>
-        <div class="group">
-          <div class="row">
-            <strong>{S.routes.exclusions.groups.bypass}</strong>
-          </div>
-          <p class="muted">{S.routes.exclusions.bypassHint}</p>
+      {#if exclusions}
+        <div class="groups">
+          {#each exclusions ?? [] as rule, i}
+            <div class="group">
+              <div class="row">
+                <label class="inline">
+                  <input
+                    type="checkbox"
+                    checked={rule.enabled}
+                    disabled={app.busy}
+                    onchange={() => void toggleRule(i)}
+                  />
+                  <strong>{rule.name}</strong>
+                </label>
+                <span class="badge muted">{ruleSummary(rule)}</span>
+                <span class="grow"></span>
+                <button disabled={app.busy} onclick={() => editExclusion(i)}>{S.routes.edit}</button>
+                <button class="danger" disabled={app.busy} onclick={() => void removeRule(i)}>{S.routes.delete}</button>
+
+              </div>
+            </div>
+          {/each}
         </div>
         <div class="buttons">
-          <button disabled={exclusions === null || app.busy} onclick={() => (editingExclusion = { target: "domains", draft: "" })}>
-            {S.routes.exclusions.add}
-          </button>
+          <button disabled={app.busy} onclick={() => editExclusion(null)}>{S.routes.exclusions.add}</button>
           {#if exclusionsSaved}<span class="ok">{S.routes.exclusions.saved}</span>{/if}
         </div>
-      </div>
+      {:else}
+        <p class="muted">{S.common.loading}</p>
+      {/if}
     {/if}
   </section>
 
@@ -452,5 +505,28 @@
   }
   .ok {
     margin-left: 10px;
+  }
+  .excl-editor .cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    margin: 12px 0;
+    align-items: start;
+  }
+  .excl-editor .cols > div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .excl-editor .cols textarea {
+    flex: 1;
+  }
+  .field-header {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .field-header .hint {
+    margin: 0;
   }
 </style>
