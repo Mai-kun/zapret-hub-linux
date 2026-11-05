@@ -380,10 +380,6 @@
               spellcheck="false"
               bind:value={editingExclusion.apps}
             ></textarea>
-            <RunningApps
-              current={editingExclusion.apps}
-              add={(name) => addApp(name)}
-            />
           </div>
           <div>
             <div class="field-header">
@@ -398,6 +394,7 @@
             />
           </div>
         </div>
+        <RunningApps current={editingExclusion.apps} add={(name) => addApp(name)} />
         <div class="buttons">
           <button class="primary" disabled={app.busy} onclick={saveEditing}>{S.routes.exclusions.save}</button>
           <button onclick={() => (editingExclusion = null)}>{S.common.close}</button>

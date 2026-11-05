@@ -140,15 +140,15 @@
     </div>
     <textarea id="route-apps" rows="6" bind:value={apps} oninput={() => mark("apps")}></textarea>
     {@render fieldErrors("apps")}
-    <RunningApps
-      current={apps}
-      add={(name) => {
-        apps = apps.trim() ? `${apps.trimEnd()}\n${name}` : name;
-        mark("apps");
-      }}
-    />
   </div>
 </div>
+<RunningApps
+  current={apps}
+  add={(name) => {
+    apps = apps.trim() ? `${apps.trimEnd()}\n${name}` : name;
+    mark("apps");
+  }}
+/>
 {#if draft.apps.length > 0 && draft.ports.length === 0 && draft.protocol !== "tcp"}<p class="muted hint">{S.routes.appsHint}</p>{/if}
 {#if draft.domains.length > 0}<p class="muted hint">{S.routes.dohHint}</p>{/if}
 <input bind:this={picker} type="file" accept=".txt" hidden onchange={importFile} />
