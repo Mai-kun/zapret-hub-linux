@@ -236,7 +236,12 @@ fn unit_hooks(name: &str) -> String {
     let Some(nft) = which.as_deref().filter(|shown| shown.starts_with('/')) else {
         return String::new();
     };
-    format!("ExecStartPre=+{nft} -f {config}\nExecStopPost=+{nft} delete table inet zapret_hub\n")
+    // The cgroup goes first: `nft` resolves `socket cgroupv2 level 1` against cgroupfs, and a
+    // first start after a reboot finds the directory gone (cgroupfs is not persistent), so the
+    // table file would fail and the whole start with it. An empty directory is all the rule needs.
+    format!(
+        "ExecStartPre=+/usr/bin/mkdir -p /sys/fs/cgroup/zapret_bypass\nExecStartPre=+{nft} -f {config}\nExecStopPost=+{nft} delete table inet zapret_hub\n"
+    )
 }
 
 /// Linux: `nfqws2` started as root drops its rights to UID 0x7FFFFFFF, which cannot even enter

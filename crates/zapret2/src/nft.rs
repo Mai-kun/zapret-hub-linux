@@ -240,12 +240,15 @@ pub fn rules() -> String {
 }
 
 /// The `ExecStartPre` and `ExecStopPost` lines a `zapret2` service that runs `nfqws2` gets: the
-/// table comes up before the engine, and steps down after it, whatever the exit.
+/// cgroup comes up before the table (`nft` resolves `socket cgroupv2` against cgroupfs, which a
+/// first start after a reboot finds empty), the table comes up before the engine, and both step
+/// down after it, whatever the exit.
 pub fn unit_hooks() -> Option<String> {
     let nft = nft_path().ok()?;
     let shown = nft.display();
+    let cgroup = CGROUP.rsplit('/').next().unwrap_or("zapret_bypass");
     Some(format!(
-        "ExecStartPre=+{shown} -f {CONFIG}\nExecStopPost=+{shown} delete table inet zapret_hub\n"
+        "ExecStartPre=+/usr/bin/mkdir -p /sys/fs/cgroup/{cgroup}\nExecStartPre=+{shown} -f {CONFIG}\nExecStopPost=+{shown} delete table inet zapret_hub\n"
     ))
 }
 
