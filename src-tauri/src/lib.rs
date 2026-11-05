@@ -13,6 +13,7 @@ mod journal;
 mod migrate;
 mod notify;
 mod routing;
+mod selfupdate;
 mod settings;
 mod shell;
 mod state;
@@ -41,11 +42,14 @@ fn specta_builder() -> Builder<tauri::Wry> {
             dto::TestsFinished,
             dto::StateChanged,
             dto::NoticesChanged,
-            dto::DownloadProgress
+            dto::DownloadProgress,
+            selfupdate::UpdateProgress
         ])
         .commands(collect_commands![
             commands::app_version,
             commands::running_apps,
+            selfupdate::runs_as_appimage,
+            selfupdate::install_portable_update,
             commands::get_settings,
             commands::save_settings,
             commands::get_overview,

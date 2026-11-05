@@ -12,6 +12,17 @@ export const commands = {
 	 *  are not offered; the user picks from what is actually running, not from memory.
 	 */
 	runningApps: () => __TAURI_INVOKE<string[]>("running_apps"),
+	/**
+	 *  Whether this instance runs from an AppImage: only there the updater plugin does the right
+	 *  thing, everywhere else the install is portable and its update goes through this module.
+	 */
+	runsAsAppimage: () => __TAURI_INVOKE<boolean>("runs_as_appimage"),
+	/**
+	 *  Downloads the `version` archive, replaces the running binaries with its own and restarts the
+	 *  app into the new one. The rename keeps the old file on a failure, so a broken download never
+	 *  takes the working install down.
+	 */
+	installPortableUpdate: (version: string) => typedError<null, string>(__TAURI_INVOKE("install_portable_update", { version })),
 	getSettings: () => __TAURI_INVOKE<Settings>("get_settings"),
 	saveSettings: (settings: Settings) => typedError<null, string>(__TAURI_INVOKE("save_settings", { settings })),
 	getOverview: () => typedError<Overview, string>(__TAURI_INVOKE("get_overview")),
@@ -150,6 +161,7 @@ export const events = {
 	stateChanged: makeEvent<StateChanged>("state-changed"),
 	testProgress: makeEvent<TestProgress>("test-progress"),
 	testsFinished: makeEvent<TestsFinished>("tests-finished"),
+	updateProgress: makeEvent<UpdateProgress>("update-progress"),
 };
 
 /* Types */
@@ -945,6 +957,12 @@ export type Traffic = {
 	flows: number,
 	up: number | null,
 	down: number | null,
+};
+
+/**  The update's progress to the page: bytes received so far, the total when the server told it. */
+export type UpdateProgress = {
+	received: number,
+	total: number | null,
 };
 
 export type Via = { via: "Opening" } | { via: "Proxy" } | { via: "Direct"; reason: DirectReason };

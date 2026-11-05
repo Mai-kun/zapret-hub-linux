@@ -25,11 +25,11 @@ use crate::settings::Settings;
 use crate::state::AppState;
 use crate::{routing, texts, window};
 
-type Answer<T> = Result<T, String>;
+pub(crate) type Answer<T> = Result<T, String>;
 
 /// Every command touches processes, the disk or the network: it runs off the async runtime, and
-/// its error reaches the page with the whole chain of causes.
-async fn blocking<T: Send + 'static>(
+/// its error reaches the page with the whole chain of causes. Also the `selfupdate`'s worker.
+pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
 ) -> Answer<T> {
     match tauri::async_runtime::spawn_blocking(work).await {
