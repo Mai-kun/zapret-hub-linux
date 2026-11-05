@@ -404,7 +404,7 @@ mod tests {
     }
 
     /// Window commands the CLI leaves out (spec 6).
-    const WINDOW_ONLY: [&str; 17] = [
+    const WINDOW_ONLY: [&str; 19] = [
         "detect_folders",
         "check_zapret2_folder",
         "pick_folder",
@@ -427,6 +427,10 @@ mod tests {
         "open_tg_proxy",
         // The editor's «Программы» chips: the running processes of the user's session.
         "running_apps",
+        // The portable self-update replaces the binary the window runs from (selfupdate spec 1);
+        // a CLI caller must not restart the app out from under the user.
+        "runs_as_appimage",
+        "install_portable_update",
     ];
 
     /// `("cmd", { a, b })` → the argument names in `bindings.ts`, sorted.
