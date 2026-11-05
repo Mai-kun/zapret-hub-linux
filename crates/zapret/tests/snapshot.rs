@@ -95,15 +95,16 @@ fn begin_restores_the_earlier_operation_before_taking_its_own() {
 fn a_failed_restore_leaves_the_file_for_the_next_attempt() {
     let dir = tempfile::tempdir().unwrap();
     let pending = pending_path(dir.path());
-    // A pre-zapret2 snapshot still restores (its restore is a no-op here) and is then replaced
-    // by the new operation; the unreadable-file failure branch needs a real system service and
-    // is covered by the refusal tests above.
+    // `zapret2: false` keeps the restore a no-op: a `true` here would send `restore` to the
+    // REAL zapret2 service of the machine the tests run on — a dev host with the hub installed
+    // would lose it (`stop_and_delete`) — and a genuinely failing restore needs a broken unit,
+    // which a test must not create.
     let snap = Snapshot {
         operation: "apply".to_owned(),
         service2: None,
         strategy2: None,
         manual_winws2: vec![],
-        zapret2: true,
+        zapret2: false,
     };
     snap.save(&pending).unwrap();
     let restored = begin("tests", &pending).unwrap();
